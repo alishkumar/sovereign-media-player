@@ -262,18 +262,24 @@ jobs:
 
             **Built by Sovereign Byte Technology · Open-Core Edition**
 
+            ### 🌟 What's New in ${{ github.ref_name }}:
+            - **Windows Standalone Portability (Fixes #3)**: Statically linked core engine and MSVC runtime (`/MT`) for zero-dependency execution out of the box (resolves `sovereign_core.dll was not found` error).
+            - **Docked UI & Custom Control Icons**: Seamless docked playback toolbar with high-contrast custom player icons and on-screen click play/pause.
+            - **Telemetry HUD**: Live hardware decoding stats, FPS, CPU/GPU usage, and rendering pipeline indicators.
+            - **Subtitles & Updater**: Restored Closed-Captions (`CC`) toggle and in-app update checker.
+
             ### 📦 Multi-Platform Downloads:
             | Platform | File | Description / Technology |
             | :--- | :--- | :--- |
             | **macOS** | `SovereignPlayer_macOS_Universal.zip` | Universal App (Apple Silicon M1–M4 + Intel Core i5/i7) · Metal Direct |
-            | **Windows** | `SovereignPlayer_Windows_x64.zip` | Windows 10/11 (`x86_64`) · Direct3D 11/12 Zero-Copy EXE + DLL |
+            | **Windows** | `SovereignPlayer_Windows_x64.zip` | Windows 10/11 (`x86_64`) · Standalone Zero-Dependency EXE + C/C++ SDK |
             | **Linux** | `SovereignPlayer_Linux_x86_64.tar.gz` | Ubuntu / Debian / Fedora (`x86_64`) · Vulkan / OpenGL / X11 |
             | **Android (APK)** | `SovereignPlayer_Android.apk` | Standalone Installable APK (Android 5.0+) |
             | **Android (NDK)** | `SovereignPlayer_Android_NDK.zip` | NDK Native Library (`arm64-v8a`) + Kotlin/Java SDK |
 
             ### 🚀 Quick Start
             - **macOS**: Unzip and drag `SovereignPlayer.app` to `/Applications`.
-            - **Windows**: Unzip and run `SovereignPlayer.exe`.
+            - **Windows**: Unzip and run `SovereignPlayer.exe` (100% standalone, no external DLLs or runtimes required).
             - **Linux**: Extract with `tar -xvf SovereignPlayer_Linux_x86_64.tar.gz` and run `./SovereignPlayer`.
             - **Android (Direct)**: Download and install `SovereignPlayer_Android.apk`.
             - **Android (NDK/SDK)**: Extract `SovereignPlayer_Android_NDK.zip` to embed `libsovereign_android.so` in your app.
