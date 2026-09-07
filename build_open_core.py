@@ -63,12 +63,14 @@ def compile_frontend():
     os.makedirs(BUILD_DIR, exist_ok=True)
     check_swift()
 
+    module_cache = os.path.join(BUILD_DIR, "module-cache")
     common_flags = (
         f"-framework Cocoa "
         f"-framework AVKit "
         f"-framework AVFoundation "
         f"-framework Metal "
         f"-framework MetalKit "
+        f"-module-cache-path {module_cache} "
         f"-O -whole-module-optimization "
         f"-Xlinker -dead_strip "
     )
