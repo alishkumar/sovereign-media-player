@@ -120,6 +120,11 @@ def bundle_app(universal_bin):
     if os.path.exists(icon_src):
         shutil.copy2(icon_src, os.path.join(resources_dir, "SovereignPlayer.icns"))
 
+    # Copy Icons Directory
+    icons_src = os.path.join(ROOT, "frontend_ui", "Resources")
+    if os.path.exists(icons_src):
+        shutil.copytree(icons_src, resources_dir, dirs_exist_ok=True)
+
     # Write Info.plist
     plist_content = '''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -132,8 +137,8 @@ def bundle_app(universal_bin):
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>Sovereign Media Player</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>3.0.0</string>
-    <key>CFBundleVersion</key><string>2026.3</string>
+    <key>CFBundleShortVersionString</key><string>1.2.0</string>
+    <key>CFBundleVersion</key><string>1.2.0</string>
     <key>LSMinimumSystemVersion</key><string>10.15</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSPrincipalClass</key><string>NSApplication</string>
