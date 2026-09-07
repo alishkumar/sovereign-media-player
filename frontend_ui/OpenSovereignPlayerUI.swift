@@ -5,38 +5,350 @@ import Metal
 import MetalKit
 import Darwin
 
+// ==============================================================================
+// 🎨 SOVEREIGN ICONS & USER ASSET LOADER (WITH TINT & NO DUPLICATION)
+// ==============================================================================
+class SovereignIcons {
+    /// Loads user PNG icon and creates a centered square template image of targetSize with internal padding.
+    static func getUserIcon(name: String, targetSize: CGFloat = 16.0) -> NSImage? {
+        var rawImg: NSImage? = nil
+        // 1. Try App Bundle Resources
+        if let url = Bundle.main.url(forResource: name, withExtension: "png", subdirectory: "icons") ??
+                     Bundle.main.url(forResource: name, withExtension: "png") {
+            rawImg = NSImage(contentsOf: url)
+        }
+        // 2. Direct Source Path Fallback
+        if rawImg == nil {
+            let localPath = "/Users/alishkumar/Documents/sovereign-media-player/frontend_ui/Resources/icons/\(name).png"
+            rawImg = NSImage(contentsOfFile: localPath)
+        }
+        guard let source = rawImg else { return nil }
 
-// ==============================================================================
-// 🎨 CUSTOM GLASSMORPHIC UI CONTROLS & VIEWS
-// ==============================================================================
-class TranslucentGlassView: NSVisualEffectView {
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        self.material = .hudWindow
-        self.blendingMode = .withinWindow
-        self.state = .active
-        self.wantsLayer = true
-        self.layer?.cornerRadius = 12.0
-        self.layer?.masksToBounds = true
-        self.layer?.borderColor = NSColor(white: 1.0, alpha: 0.15).cgColor
-        self.layer?.borderWidth = 1.0
+        // Create uniform canvas with targetSize x targetSize
+        let canvas = NSImage(size: NSSize(width: targetSize, height: targetSize))
+        canvas.lockFocus()
+        let srcSize = source.size
+        if srcSize.width > 0 && srcSize.height > 0 {
+            let aspect = srcSize.width / srcSize.height
+            var drawW = targetSize
+            var drawH = targetSize
+            if aspect > 1.0 {
+                drawH = targetSize / aspect
+            } else {
+                drawW = targetSize * aspect
+            }
+            let drawX = (targetSize - drawW) / 2.0
+            let drawY = (targetSize - drawH) / 2.0
+            source.draw(in: NSRect(x: drawX, y: drawY, width: drawW, height: drawH),
+                        from: NSRect(origin: .zero, size: srcSize),
+                        operation: .sourceOver,
+                        fraction: 1.0)
+        }
+        canvas.unlockFocus()
+        canvas.isTemplate = true
+        return canvas
     }
-    
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
+
+    static func getSymbol(name: String, fallbackText: String, pointSize: CGFloat = 14, weight: NSFont.Weight = .medium) -> NSImage? {
+        if #available(macOS 11.0, *) {
+            let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: weight)
+            if let img = NSImage(systemSymbolName: name, accessibilityDescription: nil) {
+                let templateImg = img.withSymbolConfiguration(config)
+                templateImg?.isTemplate = true
+                return templateImg
+            }
+        }
+        return nil
     }
 }
 
-// Drag and Drop Video & Stream Receiver
+// ==============================================================================
+// 🎛️ CLEAN SINGLE-ICON TOOLBAR BUTTON (NEVER DOUBLED, UNIFORM SIZING & PADDING)
+// ==============================================================================
+class SVNButton: NSButton {
+    var pointSize: CGFloat = 14.0
+    var iconSize: CGFloat = 16.0
+    var isHovered: Bool = false {
+        didSet {
+            needsDisplay = true
+            self.layer?.backgroundColor = isHovered ? NSColor(white: 0.5, alpha: 0.15).cgColor : NSColor.clear.cgColor
+        }
+    }
+    private var trackingArea: NSTrackingArea?
+
+    init(frame frameRect: NSRect, title: String = "", symbolName: String? = nil, assetName: String? = nil, pointSize: CGFloat = 13, iconSize: CGFloat = 16.0) {
+        super.init(frame: frameRect)
+        self.pointSize = pointSize
+        self.iconSize = iconSize
+        self.isBordered = false
+        self.bezelStyle = .regularSquare
+        self.wantsLayer = true
+        self.layer?.cornerRadius = 5.0
+        self.layer?.masksToBounds = true
+        self.contentTintColor = .labelColor
+        
+        updateIcon(symbolName: symbolName, assetName: assetName, fallbackText: title)
+    }
+
+    required init?(coder: NSCoder) { super.init(coder: coder) }
+
+    func updateIcon(symbolName: String?, assetName: String? = nil, fallbackText: String) {
+        var iconImg: NSImage? = nil
+        if let asset = assetName {
+            iconImg = SovereignIcons.getUserIcon(name: asset, targetSize: iconSize)
+        }
+        if iconImg == nil, let sym = symbolName {
+            iconImg = SovereignIcons.getSymbol(name: sym, fallbackText: fallbackText, pointSize: pointSize)
+        }
+
+        if let img = iconImg {
+            self.image = img
+            self.imagePosition = .imageOnly // Single icon ONLY, no duplicate text!
+            self.imageScaling = .scaleProportionallyDown
+            self.title = "" // Clear title so it never duplicates the image
+        } else {
+            self.image = nil
+            self.imagePosition = .noImage
+            self.title = fallbackText
+            self.font = NSFont.systemFont(ofSize: pointSize, weight: .semibold)
+        }
+        needsDisplay = true
+    }
+
+    override func updateTrackingAreas() {
+        if let area = trackingArea { removeTrackingArea(area) }
+        trackingArea = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self, userInfo: nil)
+        addTrackingArea(trackingArea!)
+        super.updateTrackingAreas()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+    }
+}
+
+// ==============================================================================
+// ⏱️ TIMELINE SCRUBBER (SLIDER WITH CIRCULAR DRAGGER THUMB)
+// ==============================================================================
+class SVNScrubberView: NSView {
+    var progress: Double = 0.0 {
+        didSet { needsDisplay = true }
+    }
+    var isHovered: Bool = false {
+        didSet { needsDisplay = true }
+    }
+    var isDragging: Bool = false {
+        didSet { needsDisplay = true }
+    }
+    
+    var onScrubStart: (() -> Void)?
+    var onScrubChanged: ((Double) -> Void)?
+    var onScrubEnd: ((Double) -> Void)?
+    
+    private var trackingArea: NSTrackingArea?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+    required init?(coder: NSCoder) { super.init(coder: coder) }
+    
+    override func updateTrackingAreas() {
+        if let area = trackingArea { removeTrackingArea(area) }
+        trackingArea = NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways], owner: self, userInfo: nil)
+        addTrackingArea(trackingArea!)
+        super.updateTrackingAreas()
+    }
+    
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+    }
+    override func mouseExited(with event: NSEvent) {
+        if !isDragging { isHovered = false }
+    }
+    override func mouseDown(with event: NSEvent) {
+        isDragging = true
+        isHovered = true
+        onScrubStart?()
+        updateProgress(with: event)
+    }
+    override func mouseDragged(with event: NSEvent) {
+        if isDragging {
+            updateProgress(with: event)
+        }
+    }
+    override func mouseUp(with event: NSEvent) {
+        if isDragging {
+            isDragging = false
+            let pt = convert(event.locationInWindow, from: nil)
+            isHovered = bounds.contains(pt)
+            onScrubEnd?(progress)
+        }
+    }
+    
+    private func updateProgress(with event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        let w = max(1.0, bounds.width - 12.0)
+        let val = max(0.0, min(1.0, (pt.x - 6.0) / w))
+        progress = val
+        onScrubChanged?(progress)
+    }
+    
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        
+        let trackH: CGFloat = 4.0
+        let trackY = (bounds.height - trackH) / 2.0
+        let trackW = max(1.0, bounds.width - 12.0)
+        let trackRect = NSRect(x: 6.0, y: trackY, width: trackW, height: trackH)
+        
+        // Background track (Separator color)
+        let bgPath = NSBezierPath(roundedRect: trackRect, xRadius: 2.0, yRadius: 2.0)
+        NSColor.separatorColor.setFill()
+        bgPath.fill()
+        
+        // Active played progress
+        let playedW = max(0.0, trackW * CGFloat(progress))
+        if playedW > 0 {
+            let playedRect = NSRect(x: 6.0, y: trackY, width: playedW, height: trackH)
+            let playedPath = NSBezierPath(roundedRect: playedRect, xRadius: 2.0, yRadius: 2.0)
+            NSColor(red: 0.0, green: 0.48, blue: 1.0, alpha: 0.9).setFill()
+            playedPath.fill()
+        }
+        
+        // Circular Thumb Knob
+        let thumbSize: CGFloat = (isHovered || isDragging) ? 14.0 : 12.0
+        let thumbX = 6.0 + (trackW * CGFloat(progress)) - (thumbSize / 2.0)
+        let thumbY = (bounds.height - thumbSize) / 2.0
+        let thumbRect = NSRect(x: thumbX, y: thumbY, width: thumbSize, height: thumbSize)
+        
+        let thumbPath = NSBezierPath(ovalIn: thumbRect)
+        NSColor.white.setFill()
+        thumbPath.fill()
+        
+        NSColor(white: 0.65, alpha: 1.0).setStroke()
+        thumbPath.lineWidth = 1.0
+        thumbPath.stroke()
+    }
+}
+
+// ==============================================================================
+// 🔊 HORIZONTAL VOLUME SLIDER
+// ==============================================================================
+class SVNVolumeSlider: NSView {
+    var volume: Float = 1.0 {
+        didSet { needsDisplay = true }
+    }
+    var onVolumeChanged: ((Float) -> Void)?
+    var isDragging: Bool = false
+    
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+    }
+    required init?(coder: NSCoder) { super.init(coder: coder) }
+    
+    override func mouseDown(with event: NSEvent) {
+        isDragging = true
+        updateVolume(with: event)
+    }
+    override func mouseDragged(with event: NSEvent) {
+        if isDragging { updateVolume(with: event) }
+    }
+    override func mouseUp(with event: NSEvent) {
+        isDragging = false
+    }
+    
+    private func updateVolume(with event: NSEvent) {
+        let pt = convert(event.locationInWindow, from: nil)
+        let w = max(1.0, bounds.width - 10.0)
+        let val = max(0.0, min(1.0, Float((pt.x - 5.0) / w)))
+        volume = val
+        onVolumeChanged?(volume)
+    }
+    
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        
+        let trackH: CGFloat = 3.5
+        let trackY = (bounds.height - trackH) / 2.0
+        let trackW = max(1.0, bounds.width - 10.0)
+        let trackRect = NSRect(x: 5.0, y: trackY, width: trackW, height: trackH)
+        
+        // Background track
+        let bgPath = NSBezierPath(roundedRect: trackRect, xRadius: 1.75, yRadius: 1.75)
+        NSColor.separatorColor.setFill()
+        bgPath.fill()
+        
+        // Active Volume
+        let activeW = max(0.0, trackW * CGFloat(volume))
+        if activeW > 0 {
+            let activeRect = NSRect(x: 5.0, y: trackY, width: activeW, height: trackH)
+            let activePath = NSBezierPath(roundedRect: activeRect, xRadius: 1.75, yRadius: 1.75)
+            NSColor(red: 0.0, green: 0.48, blue: 1.0, alpha: 0.9).setFill()
+            activePath.fill()
+        }
+        
+        // Knob
+        let knobSize: CGFloat = 10.0
+        let knobX = 5.0 + (trackW * CGFloat(volume)) - (knobSize / 2.0)
+        let knobY = (bounds.height - knobSize) / 2.0
+        let knobRect = NSRect(x: knobX, y: knobY, width: knobSize, height: knobSize)
+        
+        let knobPath = NSBezierPath(ovalIn: knobRect)
+        NSColor.white.setFill()
+        knobPath.fill()
+        
+        NSColor(white: 0.65, alpha: 1.0).setStroke()
+        knobPath.lineWidth = 0.8
+        knobPath.stroke()
+    }
+}
+
+// ==============================================================================
+// 🎛️ DOCKED BOTTOM TOOLBAR (NATIVE MACOS SYSTEM STYLING)
+// ==============================================================================
+class SVNDockedBarView: NSVisualEffectView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        self.material = .titlebar
+        self.blendingMode = .withinWindow
+        self.state = .active
+        self.wantsLayer = true
+        self.layer?.masksToBounds = true
+    }
+    required init?(coder: NSCoder) { super.init(coder: coder) }
+    
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        // 1px top divider line
+        let lineY = bounds.height - 1.0
+        NSColor.separatorColor.setStroke()
+        let line = NSBezierPath()
+        line.move(to: NSPoint(x: 0, y: lineY))
+        line.line(to: NSPoint(x: bounds.width, y: lineY))
+        line.lineWidth = 1.0
+        line.stroke()
+    }
+}
+
+// Drag & Drop and Double-Click Video Surface
 class VideoPlayerWindowView: NSView {
     var onFileDropped: ((URL) -> Void)?
     var onMouseMove: (() -> Void)?
+    var onSingleClick: (() -> Void)?
+    var onDoubleClick: (() -> Void)?
+    
+    private var pendingClickWorkItem: DispatchWorkItem?
     
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         registerForDraggedTypes([.fileURL, .string])
     }
-    
     required init?(coder: NSCoder) {
         super.init(coder: coder)
         registerForDraggedTypes([.fileURL, .string])
@@ -45,7 +357,6 @@ class VideoPlayerWindowView: NSView {
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
         return .copy
     }
-    
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         guard let items = sender.draggingPasteboard.pasteboardItems else { return false }
         for item in items {
@@ -64,10 +375,99 @@ class VideoPlayerWindowView: NSView {
         onMouseMove?()
         super.mouseMoved(with: event)
     }
+    
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount == 1 {
+            // Schedule single click (Play / Pause) after a tiny delay so double click can cancel it
+            pendingClickWorkItem?.cancel()
+            let workItem = DispatchWorkItem { [weak self] in
+                self?.onSingleClick?()
+            }
+            pendingClickWorkItem = workItem
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.22, execute: workItem)
+        } else if event.clickCount >= 2 {
+            // Cancel pending single click and perform double click (Fullscreen)
+            pendingClickWorkItem?.cancel()
+            pendingClickWorkItem = nil
+            onDoubleClick?()
+        } else {
+            super.mouseDown(with: event)
+        }
+    }
 }
 
 // ==============================================================================
-// 🚀 MASTER SOVEREIGN VIDEO & STREAM PLAYER CONTROLLER (v3.0)
+// 📊 REAL-TIME HARDWARE TELEMETRY HUD OVERLAY
+// ==============================================================================
+class TelemetryHUDView: NSVisualEffectView {
+    private let titleLabel = NSTextField()
+    private let statsLabel = NSTextField()
+    private let closeBtn = NSButton()
+    var onClose: (() -> Void)?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        self.material = .hudWindow
+        self.blendingMode = .withinWindow
+        self.state = .active
+        self.wantsLayer = true
+        self.layer?.cornerRadius = 8.0
+        self.layer?.masksToBounds = true
+        self.layer?.borderWidth = 1.0
+        self.layer?.borderColor = NSColor(white: 1.0, alpha: 0.2).cgColor
+
+        // Header Title
+        titleLabel.isEditable = false
+        titleLabel.isBordered = false
+        titleLabel.drawsBackground = false
+        titleLabel.textColor = .systemGreen
+        titleLabel.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        titleLabel.stringValue = "⚡ HARDWARE TELEMETRY REPORT"
+        titleLabel.frame = NSRect(x: 12, y: frameRect.height - 24, width: 230, height: 16)
+        addSubview(titleLabel)
+
+        // Close '✕' Button
+        closeBtn.isBordered = false
+        closeBtn.title = "✕"
+        closeBtn.font = NSFont.systemFont(ofSize: 11, weight: .bold)
+        closeBtn.contentTintColor = NSColor(white: 0.8, alpha: 0.8)
+        closeBtn.frame = NSRect(x: frameRect.width - 24, y: frameRect.height - 24, width: 16, height: 16)
+        closeBtn.target = self
+        closeBtn.action = #selector(handleClose)
+        addSubview(closeBtn)
+
+        // Monospaced Stats Body
+        statsLabel.isEditable = false
+        statsLabel.isBordered = false
+        statsLabel.drawsBackground = false
+        statsLabel.textColor = .white
+        statsLabel.font = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .medium)
+        statsLabel.frame = NSRect(x: 12, y: 10, width: frameRect.width - 24, height: frameRect.height - 40)
+        addSubview(statsLabel)
+    }
+
+    required init?(coder: NSCoder) { super.init(coder: coder) }
+
+    @objc private func handleClose() {
+        onClose?()
+    }
+
+    func updateTelemetry(fps: Double, cpuPercent: Double, ramMB: Double, droppedFrames: Int, resolution: String, codec: String, bufferDuration: Double) {
+        let text = """
+        • Frame Rate : \(String(format: "%.1f", fps)) FPS
+        • CPU Overhead: \(String(format: "%.1f", cpuPercent))%
+        • RAM Usage   : \(String(format: "%.1f", ramMB)) MB
+        • Dropped     : \(droppedFrames) frames
+        • Resolution  : \(resolution)
+        • Video Codec : \(codec)
+        • Forward Buff: \(String(format: "%.2f", bufferDuration))s
+        """
+        statsLabel.stringValue = text
+    }
+}
+
+// ==============================================================================
+// 🚀 MASTER SOVEREIGN VIDEO PLAYER (SOVEREIGN PLAYER)
 // ==============================================================================
 class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var window: NSWindow!
@@ -76,58 +476,53 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var playerLayer: AVPlayerLayer?
     var timeObserverToken: Any?
     
-    // UI Components
-    var controlBar: TranslucentGlassView!
-    var playPauseBtn: NSButton!
-    var timeSlider: NSSlider!
+    // Docked Bottom Toolbar
+    var bottomBar: SVNDockedBarView!
+    
+    // Control Suite (Play, Prev, Stop, Next, Scrubber, Time, Volume, EQ, Fullscreen)
+    var playPauseBtn: SVNButton!
+    var prevBtn: SVNButton!
+    var stopBtn: SVNButton!
+    var nextBtn: SVNButton!
+    var scrubberView: SVNScrubberView!
     var timeLabel: NSTextField!
-    var volumeSlider: NSSlider!
-    var volumeBtn: NSButton!
-    var speedBtn: NSPopUpButton!
-    var fullscreenBtn: NSButton!
-    var openBtn: NSButton!
-    var streamUrlBtn: NSButton!
-    var hudToggleBtn: NSButton!
+    var volumeBtn: SVNButton!
+    var volumeSlider: SVNVolumeSlider!
+    var eqBtn: SVNButton!
+    var fullscreenBtn: SVNButton!
     
-    // Telemetry HUD
-    var telemetryHUD: TranslucentGlassView!
-    var hudLabel: NSTextField!
-    var isHUDVisible = true
+    // Telemetry HUD State (Initially Hidden)
+    var telemetryHUD: TelemetryHUDView?
+    var isTelemetryVisible: Bool = false
+    var telemetryTimer: Timer?
     
-    // Playback & Streaming State
+    // Playback State
     var isPlaying = false
     var isSeeking = false
     var isLiveStream = false
     var currentDuration: Double = 0.0
     var previousVolume: Float = 1.0
     var currentSourceURL: URL?
-    var currentResolution = "4K UHD (3840 × 2160)"
-    var streamBitrate = "26.2 Mbps"
     var autoHideTimer: Timer?
     var trackingArea: NSTrackingArea?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // 1. Activate Anti-Reverse Engineering & Anti-Tamper Shield
-        
-        // 2. Setup Main Window
+        // 1. Setup Main Window (Named "Sovereign Player")
         let screenSize = NSScreen.main?.frame.size ?? CGSize(width: 1280, height: 720)
-        let winW: CGFloat = min(1280, screenSize.width * 0.85)
-        let winH: CGFloat = min(720, screenSize.height * 0.80)
+        let winW: CGFloat = min(1080, screenSize.width * 0.80)
+        let winH: CGFloat = min(640, screenSize.height * 0.75)
         let rect = NSRect(x: (screenSize.width - winW)/2, y: (screenSize.height - winH)/2, width: winW, height: winH)
         
         window = NSWindow(contentRect: rect,
-                          styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                          styleMask: [.titled, .closable, .miniaturizable, .resizable],
                           backing: .buffered,
                           defer: false)
-        window.title = "⚡ Sovereign Video & Stream Player (v3.0 Live Engine)"
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.isMovableByWindowBackground = true
-        window.backgroundColor = .black
+        window.title = "Sovereign Player"
+        window.isReleasedWhenClosed = false
         window.delegate = self
-        window.minSize = NSSize(width: 640, height: 360)
+        window.minSize = NSSize(width: 540, height: 320)
         
-        // 3. Container View & Drag-and-Drop
+        // 2. Container View (Video Surface)
         containerView = VideoPlayerWindowView(frame: window.contentView!.bounds)
         containerView.autoresizingMask = [.width, .height]
         containerView.wantsLayer = true
@@ -138,23 +533,30 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         containerView.onMouseMove = { [weak self] in
             self?.showControls()
         }
+        containerView.onSingleClick = { [weak self] in
+            guard let self = self else { return }
+            self.togglePlayPause()
+            self.showControls()
+        }
+        containerView.onDoubleClick = { [weak self] in
+            self?.toggleFullscreen()
+        }
         window.contentView?.addSubview(containerView)
         
         window.acceptsMouseMovedEvents = true
         setupTrackingArea()
 
-        // 4. Setup Controls and Telemetry HUD
-        setupControlBar()
-        setupTelemetryHUD()
+        // 3. Setup Docked Bottom Toolbar
+        setupBottomBar()
         setupKeyboardShortcuts()
         
-        // 4.5 Check for Updates
-        AppUpdater.shared.checkForUpdates(window: self.window)
+        // 4. Initial layout
+        updateUILayout()
         
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         
-        // 5. Check Initial Video Argument or Default Stream
+        // 5. Initial source
         let args = CommandLine.arguments
         if args.count > 1 {
             let pathOrUrl = args[1]
@@ -174,193 +576,225 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     
     func setupTrackingArea() {
-        if let area = trackingArea {
-            containerView.removeTrackingArea(area)
-        }
+        if let area = trackingArea { containerView.removeTrackingArea(area) }
         trackingArea = NSTrackingArea(rect: containerView.bounds,
                                       options: [.mouseMoved, .activeAlways, .inVisibleRect],
                                       owner: containerView,
                                       userInfo: nil)
         containerView.addTrackingArea(trackingArea!)
     }
-    
+
     // ==========================================================================
-    // 🎛️ GLASSMORPHIC FLOATING CONTROL BAR (WITH STREAMING URL SUPPORT)
+    // 🎛️ BUILD DOCKED BOTTOM TOOLBAR WITH USER'S CUSTOM ICONS
     // ==========================================================================
-    func setupControlBar() {
-        let barH: CGFloat = 52.0
-        let barW: CGFloat = window.contentView!.bounds.width - 40.0
-        controlBar = TranslucentGlassView(frame: NSRect(x: 20, y: 20, width: barW, height: barH))
-        controlBar.autoresizingMask = [.width, .minYMargin]
+    func setupBottomBar() {
+        let barH: CGFloat = 42.0
+        bottomBar = SVNDockedBarView(frame: NSRect(x: 0, y: 0, width: containerView.bounds.width, height: barH))
+        bottomBar.autoresizingMask = [.width, .maxYMargin]
         
-        // Play / Pause Button
-        playPauseBtn = NSButton(frame: NSRect(x: 14, y: 10, width: 32, height: 32))
-        playPauseBtn.bezelStyle = .regularSquare
-        playPauseBtn.isBordered = false
-        playPauseBtn.title = "▶"
-        playPauseBtn.font = NSFont.systemFont(ofSize: 18, weight: .bold)
-        playPauseBtn.contentTintColor = .white
+        let btnY: CGFloat = 7.0
+        let btnSize: CGFloat = 28.0
+        
+        // 1. Play / Pause Button (Loads icon_play.png / icon_pause.png)
+        playPauseBtn = SVNButton(frame: NSRect(x: 10, y: btnY, width: btnSize, height: btnSize),
+                                 title: "▶",
+                                 symbolName: "play.fill",
+                                 assetName: "icon_play",
+                                 pointSize: 13,
+                                 iconSize: 15.0)
+        playPauseBtn.toolTip = "Play / Pause (Space)"
         playPauseBtn.target = self
         playPauseBtn.action = #selector(togglePlayPause)
-        controlBar.addSubview(playPauseBtn)
+        bottomBar.addSubview(playPauseBtn)
         
-        // Time Slider (Scrubber)
-        // Stop Button (VLC style)
-        let stopBtn = NSButton(frame: NSRect(x: 54, y: 10, width: 32, height: 32))
-        stopBtn.bezelStyle = .regularSquare
-        stopBtn.isBordered = false
-        stopBtn.title = "⏹"
-        stopBtn.font = NSFont.systemFont(ofSize: 18, weight: .bold)
-        stopBtn.contentTintColor = .white
+        // 2. Rewind / Step Back (Loads icon_backward.png - rotated 180 from forward)
+        prevBtn = SVNButton(frame: NSRect(x: 42, y: btnY, width: btnSize, height: btnSize),
+                            title: "◀◀",
+                            symbolName: "backward.fill",
+                            assetName: "icon_backward",
+                            pointSize: 13,
+                            iconSize: 15.0)
+        prevBtn.toolTip = "Seek Backward 10s (←)"
+        prevBtn.target = self
+        prevBtn.action = #selector(rewind10)
+        bottomBar.addSubview(prevBtn)
+        
+        // 3. Stop Button (⏹)
+        stopBtn = SVNButton(frame: NSRect(x: 74, y: btnY, width: btnSize, height: btnSize),
+                            title: "⏹",
+                            symbolName: "stop.fill",
+                            pointSize: 12,
+                            iconSize: 13.0)
+        stopBtn.toolTip = "Stop (S)"
         stopBtn.target = self
         stopBtn.action = #selector(stopPlayback)
-        controlBar.addSubview(stopBtn)
-
-        timeSlider = NSSlider(frame: NSRect(x: 94, y: 14, width: barW - 584, height: 24))
-        timeSlider.autoresizingMask = [.width]
-        timeSlider.minValue = 0.0
-        timeSlider.maxValue = 1.0
-        timeSlider.doubleValue = 0.0
-        timeSlider.target = self
-        timeSlider.action = #selector(timeSliderChanged(_:))
-        controlBar.addSubview(timeSlider)
+        bottomBar.addSubview(stopBtn)
         
-        // Time / Live Status Label
-        timeLabel = NSTextField(frame: NSRect(x: barW - 478, y: 16, width: 100, height: 20))
-        timeLabel.autoresizingMask = [.minXMargin]
+        // 4. Fast Forward / Step Next (Loads icon_forward.png)
+        nextBtn = SVNButton(frame: NSRect(x: 106, y: btnY, width: btnSize, height: btnSize),
+                            title: "▶▶",
+                            symbolName: "forward.fill",
+                            assetName: "icon_forward",
+                            pointSize: 13,
+                            iconSize: 15.0)
+        nextBtn.toolTip = "Seek Forward 10s (→)"
+        nextBtn.target = self
+        nextBtn.action = #selector(forward10)
+        bottomBar.addSubview(nextBtn)
+        
+        // 5. Timeline Scrubber
+        scrubberView = SVNScrubberView(frame: NSRect(x: 142, y: btnY + 4.0, width: 300, height: 20))
+        scrubberView.onScrubStart = { [weak self] in
+            self?.isSeeking = true
+        }
+        scrubberView.onScrubChanged = { [weak self] progress in
+            guard let self = self, self.currentDuration > 0, !self.isLiveStream else { return }
+            let curSec = progress * self.currentDuration
+            let curStr = self.formatTime(seconds: curSec)
+            let durStr = self.formatTime(seconds: self.currentDuration)
+            self.timeLabel.stringValue = "\(curStr) / \(durStr)"
+        }
+        scrubberView.onScrubEnd = { [weak self] progress in
+            guard let self = self, let player = self.player, self.currentDuration > 0, !self.isLiveStream else {
+                self?.isSeeking = false
+                return
+            }
+            let targetSec = progress * self.currentDuration
+            let targetTime = CMTime(seconds: targetSec, preferredTimescale: 600)
+            player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+                self?.isSeeking = false
+            }
+        }
+        bottomBar.addSubview(scrubberView)
+        
+        // 6. Time Display Label (00:00 / 00:00)
+        timeLabel = NSTextField(frame: NSRect(x: 450, y: btnY + 5.0, width: 95, height: 18))
         timeLabel.isEditable = false
         timeLabel.isBordered = false
         timeLabel.drawsBackground = false
-        timeLabel.textColor = NSColor(white: 0.85, alpha: 1.0)
-        timeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+        timeLabel.alignment = .center
+        timeLabel.textColor = .labelColor
+        timeLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         timeLabel.stringValue = "00:00 / 00:00"
-        controlBar.addSubview(timeLabel)
+        bottomBar.addSubview(timeLabel)
         
-        // Volume Button & Slider
-        volumeBtn = NSButton(frame: NSRect(x: barW - 374, y: 12, width: 28, height: 28))
-        volumeBtn.autoresizingMask = [.minXMargin]
-        volumeBtn.bezelStyle = .regularSquare
-        volumeBtn.isBordered = false
-        volumeBtn.title = "🔊"
-        volumeBtn.font = NSFont.systemFont(ofSize: 14)
+        // 7. Volume Speaker Button
+        volumeBtn = SVNButton(frame: NSRect(x: 550, y: btnY, width: btnSize, height: btnSize),
+                              title: "🔊",
+                              symbolName: "speaker.wave.3.fill",
+                              pointSize: 13,
+                              iconSize: 15.0)
+        volumeBtn.toolTip = "Mute / Unmute (M)"
         volumeBtn.target = self
         volumeBtn.action = #selector(toggleMute)
-        controlBar.addSubview(volumeBtn)
+        bottomBar.addSubview(volumeBtn)
         
-        volumeSlider = NSSlider(frame: NSRect(x: barW - 342, y: 15, width: 65, height: 22))
-        volumeSlider.autoresizingMask = [.minXMargin]
-        volumeSlider.minValue = 0.0
-        volumeSlider.maxValue = 1.0
-        volumeSlider.doubleValue = 1.0
-        volumeSlider.target = self
-        volumeSlider.action = #selector(volumeSliderChanged(_:))
-        controlBar.addSubview(volumeSlider)
+        // 8. Horizontal Volume Slider
+        volumeSlider = SVNVolumeSlider(frame: NSRect(x: 582, y: btnY + 5.0, width: 65, height: 18))
+        volumeSlider.volume = 1.0
+        volumeSlider.onVolumeChanged = { [weak self] newVol in
+            guard let self = self, let player = self.player else { return }
+            player.volume = newVol
+            self.updateVolumeIcon(vol: newVol)
+        }
+        bottomBar.addSubview(volumeSlider)
         
-        // Speed Selector
-        speedBtn = NSPopUpButton(frame: NSRect(x: barW - 272, y: 12, width: 62, height: 28), pullsDown: false)
-        speedBtn.autoresizingMask = [.minXMargin]
-        speedBtn.addItems(withTitles: ["0.5x", "1.0x", "1.25x", "1.5x", "2.0x"])
-        speedBtn.selectItem(withTitle: "1.0x")
-        speedBtn.target = self
-        speedBtn.action = #selector(speedChanged(_:))
-        controlBar.addSubview(speedBtn)
+        // 9. Equalizer / Effects (EQ) Button
+        eqBtn = SVNButton(frame: NSRect(x: 652, y: btnY, width: btnSize, height: btnSize),
+                          title: "EQ",
+                          symbolName: "slider.horizontal.3",
+                          pointSize: 13,
+                          iconSize: 15.0)
+        eqBtn.toolTip = "Audio & Video Effects / Speed"
+        eqBtn.target = self
+        eqBtn.action = #selector(showEffectsMenu)
+        bottomBar.addSubview(eqBtn)
         
-        // Subtitle Toggle Button (CC)
-        let subtitleBtn = NSButton(frame: NSRect(x: barW - 164, y: 12, width: 32, height: 28))
-        subtitleBtn.autoresizingMask = [.minXMargin]
-        subtitleBtn.bezelStyle = .regularSquare
-        subtitleBtn.isBordered = false
-        subtitleBtn.title = "CC"
-        subtitleBtn.font = NSFont.systemFont(ofSize: 13, weight: .bold)
-        subtitleBtn.toolTip = "Toggle Subtitles (C)"
-        subtitleBtn.target = self
-        subtitleBtn.action = #selector(toggleSubtitles)
-        controlBar.addSubview(subtitleBtn)
-
-        // Open Stream URL Button (🌐)
-        streamUrlBtn = NSButton(frame: NSRect(x: barW - 124, y: 12, width: 32, height: 28))
-        streamUrlBtn.autoresizingMask = [.minXMargin]
-        streamUrlBtn.bezelStyle = .regularSquare
-        streamUrlBtn.isBordered = false
-        streamUrlBtn.title = "🌐"
-        streamUrlBtn.font = NSFont.systemFont(ofSize: 15)
-        streamUrlBtn.toolTip = "Open Live Stream URL (HLS / m3u8 / RTSP / HTTPS) (⌘U)"
-        streamUrlBtn.target = self
-        streamUrlBtn.action = #selector(promptOpenStreamURL)
-        controlBar.addSubview(streamUrlBtn)
-
-        // Open Local File Button (📁)
-        openBtn = NSButton(frame: NSRect(x: barW - 124, y: 12, width: 32, height: 28))
-        openBtn.autoresizingMask = [.minXMargin]
-        openBtn.bezelStyle = .regularSquare
-        openBtn.isBordered = false
-        openBtn.title = "📁"
-        openBtn.font = NSFont.systemFont(ofSize: 15)
-        openBtn.toolTip = "Open Video File (⌘O)"
-        openBtn.target = self
-        openBtn.action = #selector(promptOpenFile)
-        controlBar.addSubview(openBtn)
-
-        // HUD Toggle Button (📊)
-        hudToggleBtn = NSButton(frame: NSRect(x: barW - 84, y: 12, width: 32, height: 28))
-        hudToggleBtn.autoresizingMask = [.minXMargin]
-        hudToggleBtn.bezelStyle = .regularSquare
-        hudToggleBtn.isBordered = false
-        hudToggleBtn.title = "📊"
-        hudToggleBtn.font = NSFont.systemFont(ofSize: 14)
-        hudToggleBtn.toolTip = "Toggle Telemetry HUD (T)"
-        hudToggleBtn.target = self
-        hudToggleBtn.action = #selector(toggleHUD)
-        controlBar.addSubview(hudToggleBtn)
-        
-        // Fullscreen Button (⛶)
-        fullscreenBtn = NSButton(frame: NSRect(x: barW - 44, y: 12, width: 32, height: 28))
-        fullscreenBtn.autoresizingMask = [.minXMargin]
-        fullscreenBtn.bezelStyle = .regularSquare
-        fullscreenBtn.isBordered = false
-        fullscreenBtn.title = "⛶"
-        fullscreenBtn.font = NSFont.systemFont(ofSize: 16, weight: .bold)
+        // 10. Fullscreen Button (Loads icon_fullscreen.png)
+        fullscreenBtn = SVNButton(frame: NSRect(x: 684, y: btnY, width: btnSize, height: btnSize),
+                                  title: "⤢",
+                                  symbolName: "arrow.up.left.and.arrow.down.right",
+                                  assetName: "icon_fullscreen",
+                                  pointSize: 13,
+                                  iconSize: 15.0)
         fullscreenBtn.toolTip = "Toggle Fullscreen (F)"
         fullscreenBtn.target = self
         fullscreenBtn.action = #selector(toggleFullscreen)
-        controlBar.addSubview(fullscreenBtn)
+        bottomBar.addSubview(fullscreenBtn)
         
-        containerView.addSubview(controlBar)
+        containerView.addSubview(bottomBar)
     }
 
     // ==========================================================================
-    // 📊 REAL-TIME STREAMING & HARDWARE TELEMETRY HUD
+    // 📐 RESPONSIVE DOCKED TOOLBAR LAYOUT
     // ==========================================================================
-    func setupTelemetryHUD() {
-        let hudW: CGFloat = 280.0
-        let hudH: CGFloat = 130.0
-        let topY = window.contentView!.bounds.height - hudH - 20.0
-        let rightX = window.contentView!.bounds.width - hudW - 20.0
+    func updateUILayout() {
+        guard containerView != nil, bottomBar != nil else { return }
         
-        telemetryHUD = TranslucentGlassView(frame: NSRect(x: rightX, y: topY, width: hudW, height: hudH))
-        telemetryHUD.autoresizingMask = [.minXMargin, .minYMargin]
+        let winW = containerView.bounds.width
+        let winH = containerView.bounds.height
+        let isFull = window.styleMask.contains(.fullScreen)
+        let barH: CGFloat = 42.0
         
-        hudLabel = NSTextField(frame: NSRect(x: 12, y: 8, width: hudW - 24, height: hudH - 16))
-        hudLabel.isEditable = false
-        hudLabel.isBordered = false
-        hudLabel.drawsBackground = false
-        hudLabel.textColor = NSColor(red: 0.4, green: 0.95, blue: 0.65, alpha: 1.0)
-        hudLabel.font = NSFont.monospacedSystemFont(ofSize: 10.5, weight: .regular)
-        hudLabel.stringValue = """
-        ⚡ SOVEREIGN STREAM TURBO
-        • V-Sync: 60.0 FPS (0 Lost)
-        • CPU Load: 0.7% | RAM: 94 MB
-        • Stream: Local Metal Direct
-        • Resolution: 4K UHD 3840x2160
-        • Buffer Health: 100% (Instant Pre-Roll)
-        • Color: SMPTE 170M (5-1-6)
-        """
-        telemetryHUD.addSubview(hudLabel)
-        containerView.addSubview(telemetryHUD)
+        if isFull {
+            let hudW = min(winW - 60.0, 900.0)
+            bottomBar.frame = NSRect(x: (winW - hudW) / 2.0, y: 24.0, width: hudW, height: barH)
+            bottomBar.layer?.cornerRadius = 10.0
+            bottomBar.layer?.borderWidth = 1.0
+            bottomBar.layer?.borderColor = NSColor(white: 1.0, alpha: 0.25).cgColor
+        } else {
+            bottomBar.frame = NSRect(x: 0, y: 0, width: winW, height: barH)
+            bottomBar.layer?.cornerRadius = 0.0
+            bottomBar.layer?.borderWidth = 0.0
+        }
+        
+        let currentBarW = bottomBar.bounds.width
+        let btnY: CGFloat = 7.0
+        let btnSize: CGFloat = 28.0
+        
+        // Left Buttons: Play(28) + Prev(28) + Stop(28) + Next(28)
+        playPauseBtn.frame = NSRect(x: 10, y: btnY, width: btnSize, height: btnSize)
+        prevBtn.frame = NSRect(x: 42, y: btnY, width: btnSize, height: btnSize)
+        stopBtn.frame = NSRect(x: 74, y: btnY, width: btnSize, height: btnSize)
+        nextBtn.frame = NSRect(x: 106, y: btnY, width: btnSize, height: btnSize)
+        
+        // Right Controls: Fullscreen(28) + EQ(28) + VolSlider(65) + VolBtn(28) + Time(98)
+        let rightMargin: CGFloat = 10.0
+        fullscreenBtn.frame = NSRect(x: currentBarW - rightMargin - btnSize, y: btnY, width: btnSize, height: btnSize)
+        
+        eqBtn.frame = NSRect(x: currentBarW - rightMargin - btnSize - 32.0, y: btnY, width: btnSize, height: btnSize)
+        volumeSlider.frame = NSRect(x: currentBarW - rightMargin - btnSize - 32.0 - 70.0, y: btnY + 5.0, width: 65.0, height: 18.0)
+        volumeBtn.frame = NSRect(x: currentBarW - rightMargin - btnSize - 32.0 - 70.0 - btnSize - 4.0, y: btnY, width: btnSize, height: btnSize)
+        timeLabel.frame = NSRect(x: currentBarW - rightMargin - btnSize - 32.0 - 70.0 - btnSize - 4.0 - 102.0, y: btnY + 5.0, width: 98.0, height: 18.0)
+        
+        // Scrubber fills middle area
+        let scrubLeft: CGFloat = 142.0
+        let scrubRight: CGFloat = currentBarW - rightMargin - btnSize - 32.0 - 70.0 - btnSize - 4.0 - 106.0
+        let scrubW = max(60.0, scrubRight - scrubLeft)
+        scrubberView.frame = NSRect(x: scrubLeft, y: btnY + 4.0, width: scrubW, height: 20.0)
+        
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        if isFull {
+            playerLayer?.frame = containerView.bounds
+        } else {
+            playerLayer?.frame = NSRect(x: 0, y: barH, width: winW, height: winH - barH)
+        }
+        CATransaction.commit()
+    }
+
+    func windowDidResize(_ notification: Notification) {
+        updateUILayout()
+    }
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        updateUILayout()
+    }
+    func windowDidExitFullScreen(_ notification: Notification) {
+        updateUILayout()
     }
 
     // ==========================================================================
-    // 🎬 UNIFIED MEDIA & LIVE STREAMING ENGINE (HLS / DASH / RTSP / HTTPS / MP4)
+    // 🎬 MEDIA PLAYBACK ENGINE
     // ==========================================================================
     func loadMediaSource(url: URL) {
         currentSourceURL = url
@@ -368,8 +802,8 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let isHLS = url.pathExtension.lowercased() == "m3u8" || url.absoluteString.contains(".m3u8")
         isLiveStream = isRemote && isHLS
         
-        let titleName = isRemote ? url.lastPathComponent : url.lastPathComponent
-        window.title = "⚡ Sovereign Player — \(titleName) \(isLiveStream ? "[🔴 LIVE STREAM]" : "")"
+        let titleName = url.lastPathComponent
+        window.title = "\(titleName) — Sovereign Player"
         
         playerLayer?.removeFromSuperlayer()
         if let token = timeObserverToken {
@@ -381,56 +815,22 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "AVURLAssetAllowsCellularAccessKey": true,
             "AVURLAssetPreferPreciseDurationAndTimingKey": true
         ]
-        
-        // Only force HLS MIME type for actual HLS streams; otherwise, it breaks local MP4/MKV playback
         if isHLS {
             assetOptions["AVURLAssetOutOfBandMIMETypeKey"] = "application/x-mpegURL"
         }
         
         let asset = AVURLAsset(url: url, options: assetOptions)        
         let playerItem = AVPlayerItem(asset: asset)
-        playerItem.preferredForwardBufferDuration = 1.0 // Ultra-Low-Latency Pre-Roll Buffer
+        playerItem.preferredForwardBufferDuration = 1.0
         player = AVPlayer(playerItem: playerItem)
         player?.automaticallyWaitsToMinimizeStalling = true
         
-        // Direct Metal Zero-Copy GPU Presentation Layer
         playerLayer = AVPlayerLayer(player: player)
         playerLayer?.videoGravity = .resizeAspect
-        playerLayer?.frame = containerView.bounds
-        playerLayer?.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        
+        playerLayer?.frame = NSRect(x: 0, y: 42.0, width: containerView.bounds.width, height: containerView.bounds.height - 42.0)
         containerView.layer?.insertSublayer(playerLayer!, at: 0)
         
-        // Detect Track Info — modern async API (macOS 12+), fallback for older Macs
-        if #available(macOS 12.0, *) {
-            Task {
-                if let tracks = try? await asset.load(.tracks),
-                   let track = tracks.first(where: { $0.mediaType == .video }),
-                   let size = try? await track.load(.naturalSize) {
-                    await MainActor.run {
-                        self.currentResolution = "\(Int(size.width)) × \(Int(size.height))"
-                        if size.width >= 3840 { self.currentResolution = "4K UHD (3840 × 2160)" }
-                        else if size.width >= 1920 { self.currentResolution = "1080p FHD (1920 × 1080)" }
-                    }
-                } else {
-                    await MainActor.run {
-                        self.currentResolution = isRemote ? "Adaptive Live Stream" : "4K UHD (3840 × 2160)"
-                    }
-                }
-            }
-        } else {
-            // Fallback for macOS 10.15 / 11 (Intel Macs)
-            if let track = asset.tracks(withMediaType: .video).first {
-                let size = track.naturalSize
-                currentResolution = "\(Int(size.width)) × \(Int(size.height))"
-                if size.width >= 3840 { currentResolution = "4K UHD (3840 × 2160)" }
-                else if size.width >= 1920 { currentResolution = "1080p FHD (1920 × 1080)" }
-            } else {
-                currentResolution = isRemote ? "Adaptive Live Stream" : "4K UHD (3840 × 2160)"
-            }
-        }
-        
-        // Time & Live Progress Observer
+        // Time Observer
         let interval = CMTime(seconds: 0.1, preferredTimescale: 600)
         timeObserverToken = player?.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             guard let self = self else { return }
@@ -438,24 +838,21 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             
             if durSec.isInfinite || durSec.isNaN || self.isLiveStream {
                 self.isLiveStream = true
-                self.timeSlider.doubleValue = 1.0
-                self.timeLabel.stringValue = "🔴 LIVE STREAM"
-                self.timeLabel.textColor = NSColor(red: 1.0, green: 0.3, blue: 0.3, alpha: 1.0)
+                self.scrubberView.progress = 1.0
+                self.timeLabel.stringValue = "🔴 Live"
             } else if durSec > 0 && !self.isSeeking {
                 self.currentDuration = durSec
-                self.timeSlider.doubleValue = time.seconds / durSec
+                self.scrubberView.progress = time.seconds / durSec
                 let curStr = self.formatTime(seconds: time.seconds)
                 let durStr = self.formatTime(seconds: durSec)
                 self.timeLabel.stringValue = "\(curStr) / \(durStr)"
-                self.timeLabel.textColor = NSColor(white: 0.85, alpha: 1.0)
             }
-            self.updateTelemetry()
         }
         
         player?.play()
         isPlaying = true
-        playPauseBtn.title = "❚❚"
-        showControls()
+        playPauseBtn.updateIcon(symbolName: "pause.fill", assetName: "icon_pause", fallbackText: "❚❚")
+        updateUILayout()
     }
 
     func formatTime(seconds: Double) -> String {
@@ -465,43 +862,145 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let s = total % 60
         let h = total / 3600
         if h > 0 {
-            return String(format: "%02d:%02d:%02d", h, m, s)
+            return String(format: "%d:%02d:%02d", h, m, s)
         } else {
             return String(format: "%02d:%02d", m, s)
         }
     }
-    
-    func updateTelemetry() {
-        let cpuVal = isPlaying ? "0.7%" : "0.0%"
-        let fpsVal = isPlaying ? "60.0 FPS" : "Paused"
-        let streamType = isLiveStream ? "🔴 Live HLS / ABR Stream" : "Local Metal Direct Stream"
-        
-        hudLabel.stringValue = """
-        ⚡ SOVEREIGN STREAM TURBO
-        • V-Sync: \(fpsVal) (0 Lost)
-        • CPU Load: \(cpuVal) | RAM: 94 MB
-        • Stream: \(streamType)
-        • Resolution: \(currentResolution)
-        • Buffer Health: 100% (Instant 120ms Pre-Roll)
-        • Color: SMPTE 170M / Rec.709 Direct
-        """
-    }
 
     // ==========================================================================
-    // 🌐 STREAM URL PROMPT DIALOG (HLS / m3u8 / RTSP / HTTP)
+    // 🎮 ACTION HANDLERS
     // ==========================================================================
+    @objc func togglePlayPause() {
+        guard let player = player else { return }
+        if isPlaying {
+            player.pause()
+            isPlaying = false
+            playPauseBtn.updateIcon(symbolName: "play.fill", assetName: "icon_play", fallbackText: "▶")
+        } else {
+            player.play()
+            isPlaying = true
+            playPauseBtn.updateIcon(symbolName: "pause.fill", assetName: "icon_pause", fallbackText: "❚❚")
+        }
+    }
+    
+    // Stop: pauses, resets timeline to 00:00, and updates scrubber
+    @objc func stopPlayback() {
+        guard let player = player else { return }
+        player.pause()
+        player.seek(to: CMTime.zero, toleranceBefore: .zero, toleranceAfter: .zero)
+        isPlaying = false
+        scrubberView.progress = 0.0
+        let durStr = formatTime(seconds: currentDuration)
+        timeLabel.stringValue = "00:00 / \(durStr)"
+        playPauseBtn.updateIcon(symbolName: "play.fill", assetName: "icon_play", fallbackText: "▶")
+        showControls(keepVisible: true)
+    }
+    
+    @objc func rewind10() {
+        seekOffset(seconds: -10.0)
+    }
+    
+    @objc func forward10() {
+        seekOffset(seconds: 10.0)
+    }
+    
+    func seekOffset(seconds: Double) {
+        guard let player = player, currentDuration > 0, !isLiveStream else { return }
+        let cur = player.currentTime().seconds
+        let target = max(0, min(currentDuration, cur + seconds))
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    func updateVolumeIcon(vol: Float) {
+        if vol == 0 {
+            volumeBtn.updateIcon(symbolName: "speaker.slash.fill", fallbackText: "🔇")
+        } else if vol < 0.5 {
+            volumeBtn.updateIcon(symbolName: "speaker.wave.1.fill", fallbackText: "🔉")
+        } else {
+            volumeBtn.updateIcon(symbolName: "speaker.wave.3.fill", fallbackText: "🔊")
+        }
+    }
+    
+    @objc func toggleMute() {
+        guard let player = player else { return }
+        if player.volume > 0 {
+            previousVolume = player.volume
+            player.volume = 0
+            volumeSlider.volume = 0
+            updateVolumeIcon(vol: 0)
+        } else {
+            let restored = (previousVolume > 0) ? previousVolume : 1.0
+            player.volume = restored
+            volumeSlider.volume = restored
+            updateVolumeIcon(vol: restored)
+        }
+    }
+    
+    func adjustVolume(delta: Float) {
+        guard let player = player else { return }
+        let newVol = max(0.0, min(1.0, player.volume + delta))
+        player.volume = newVol
+        volumeSlider.volume = newVol
+        updateVolumeIcon(vol: newVol)
+    }
+    
+    @objc func toggleFullscreen() {
+        window.toggleFullScreen(nil)
+    }
+
+    @objc func showEffectsMenu() {
+        let menu = NSMenu(title: "Effects & Speed")
+        
+        let speedHeader = NSMenuItem(title: "Playback Speed", action: nil, keyEquivalent: "")
+        speedHeader.isEnabled = false
+        menu.addItem(speedHeader)
+        
+        let speeds: [Float] = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+        let curRate = player?.rate ?? 1.0
+        for spd in speeds {
+            let isCurrent = (abs(curRate - spd) < 0.05)
+            let checkmark = isCurrent ? "✓ " : "    "
+            let item = NSMenuItem(title: "\(checkmark)\(spd)x", action: #selector(handleSpeedSelect(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = spd
+            menu.addItem(item)
+        }
+        
+        menu.addItem(NSMenuItem.separator())
+        let openFileItem = NSMenuItem(title: "Open File... (⌘O)", action: #selector(promptOpenFile), keyEquivalent: "")
+        openFileItem.target = self
+        menu.addItem(openFileItem)
+        
+        let openStreamItem = NSMenuItem(title: "Open Network Stream... (⌘U)", action: #selector(promptOpenStreamURL), keyEquivalent: "")
+        openStreamItem.target = self
+        menu.addItem(openStreamItem)
+        
+        menu.addItem(NSMenuItem.separator())
+        let telemetryTitle = isTelemetryVisible ? "✓ Hide Telemetry Report (T)" : "   Show Telemetry Report (T)"
+        let telemetryItem = NSMenuItem(title: telemetryTitle, action: #selector(toggleTelemetry), keyEquivalent: "")
+        telemetryItem.target = self
+        menu.addItem(telemetryItem)
+        
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: eqBtn.bounds.height + 4), in: eqBtn)
+    }
+    
+    @objc private func handleSpeedSelect(_ sender: NSMenuItem) {
+        if let spd = sender.representedObject as? Float {
+            player?.rate = isPlaying ? spd : 0.0
+        }
+    }
+
     @objc func promptOpenStreamURL() {
         let alert = NSAlert()
-        alert.messageText = "⚡ Open Live Network Stream"
-        alert.informativeText = "Enter any live streaming URL (HLS .m3u8, DASH, RTSP, or direct MP4/MKV web link):"
+        alert.messageText = "Open Network Stream"
+        alert.informativeText = "Enter network stream URL (HLS / m3u8 / RTSP / HTTP):"
         alert.alertStyle = .informational
-        alert.addButton(withTitle: "Play Stream")
+        alert.addButton(withTitle: "Open")
         alert.addButton(withTitle: "Cancel")
         
         let inputTextField = NSTextField(frame: NSRect(x: 0, y: 0, width: 440, height: 26))
-        inputTextField.placeholderString = "https://example.com/live/stream.m3u8 or rtsp://..."
-        
-        // Preset popular sample public test stream
+        inputTextField.placeholderString = "https://example.com/stream.m3u8"
         inputTextField.stringValue = "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8"
         alert.accessoryView = inputTextField
         
@@ -514,90 +1013,6 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    // ==========================================================================
-    // 🎮 ACTIONS & EVENT HANDLERS
-    // ==========================================================================
-
-    @objc func stopPlayback() {
-        guard let player = player else { return }
-        player.pause()
-        player.seek(to: CMTime.zero)
-        isPlaying = false
-        playPauseBtn.title = "▶"
-        showControls(keepVisible: true)
-    }
-    @objc func togglePlayPause() {
-        guard let player = player else { return }
-        if isPlaying {
-            player.pause()
-            isPlaying = false
-            playPauseBtn.title = "▶"
-            showControls(keepVisible: true)
-        } else {
-            player.play()
-            isPlaying = true
-            playPauseBtn.title = "❚❚"
-            showControls()
-        }
-        updateTelemetry()
-    }
-    
-    @objc func timeSliderChanged(_ sender: NSSlider) {
-        guard let player = player, currentDuration > 0, !isLiveStream else { return }
-        let targetSec = sender.doubleValue * currentDuration
-        let targetTime = CMTime(seconds: targetSec, preferredTimescale: 600)
-        
-        isSeeking = true
-        player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
-            self?.isSeeking = false
-        }
-        timeLabel.stringValue = "\(formatTime(seconds: targetSec)) / \(formatTime(seconds: currentDuration))"
-        showControls()
-    }
-    
-    @objc func volumeSliderChanged(_ sender: NSSlider) {
-        let vol = Float(sender.doubleValue)
-        player?.volume = vol
-        volumeBtn.title = (vol == 0) ? "🔇" : ((vol < 0.5) ? "🔉" : "🔊")
-        showControls()
-    }
-    
-    @objc func toggleMute() {
-        guard let player = player else { return }
-        if player.volume > 0 {
-            previousVolume = player.volume
-            player.volume = 0
-            volumeSlider.doubleValue = 0
-            volumeBtn.title = "🔇"
-        } else {
-            let restored = (previousVolume > 0) ? previousVolume : 1.0
-            player.volume = restored
-            volumeSlider.doubleValue = Double(restored)
-            volumeBtn.title = "🔊"
-        }
-        showControls()
-    }
-    
-    @objc func speedChanged(_ sender: NSPopUpButton) {
-        guard let player = player, let title = sender.selectedItem?.title else { return }
-        let speedStr = title.replacingOccurrences(of: "x", with: "")
-        if let speed = Float(speedStr) {
-            player.rate = isPlaying ? speed : 0.0
-        }
-        showControls()
-    }
-    
-    @objc func toggleFullscreen() {
-        window.toggleFullScreen(nil)
-        showControls()
-    }
-    
-    @objc func toggleHUD() {
-        isHUDVisible.toggle()
-        telemetryHUD.isHidden = !isHUDVisible
-        showControls()
-    }
-
     @objc func promptOpenFile() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
@@ -608,77 +1023,188 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         } else {
             panel.allowedFileTypes = ["mp4", "mov", "mkv", "hevc", "avi", "webm", "m4v", "m3u8", "m3u"]
         }
-        panel.prompt = "Play in Sovereign Player"
-        panel.title = "Select Video or Stream Playlist"
+        panel.prompt = "Open"
+        panel.title = "Open Media"
         
         if panel.runModal() == .OK, let url = panel.url {
             loadMediaSource(url: url)
         }
     }
-    
-    @objc func toggleSubtitles() {
-        guard let item = player?.currentItem else { return }
-        
-        if #available(macOS 12.0, *) {
-            Task {
-                do {
-                    if let group = try await item.asset.loadMediaSelectionGroup(for: .legible) {
-                        await MainActor.run {
-                            if item.currentMediaSelection.selectedMediaOption(in: group) != nil {
-                                item.select(nil, in: group) // Turn off subtitles
-                            } else {
-                                // Turn on default subtitles
-                                let options = AVMediaSelectionGroup.mediaSelectionOptions(from: group.options, with: .current)
-                                if let first = options.first ?? group.options.first {
-                                    item.select(first, in: group)
-                                }
-                            }
-                        }
-                    }
-                } catch {
-                    print("Could not load subtitle tracks: \(error)")
-                }
-            }
+
+    // ==========================================================================
+    // 📊 HARDWARE TELEMETRY HUD CONTROLLER (SHOW / HIDE ON DEMAND)
+    // ==========================================================================
+    @objc func toggleTelemetry() {
+        if isTelemetryVisible {
+            hideTelemetryHUD()
         } else {
-            // Fallback for macOS 10.15 / 11
-            if let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) {
-                if item.currentMediaSelection.selectedMediaOption(in: group) != nil {
-                    item.select(nil, in: group)
-                } else {
-                    let options = AVMediaSelectionGroup.mediaSelectionOptions(from: group.options, with: .current)
-                    if let first = options.first ?? group.options.first {
-                        item.select(first, in: group)
-                    }
-                }
-            }
+            showTelemetryHUD()
         }
     }
 
-    // Auto-Hide Controls on Inactivity
+    func showTelemetryHUD() {
+        isTelemetryVisible = true
+        if telemetryHUD == nil {
+            let hudW: CGFloat = 260.0
+            let hudH: CGFloat = 165.0
+            let hudX = containerView.bounds.width - hudW - 16.0
+            let hudY = containerView.bounds.height - hudH - 16.0
+            let hud = TelemetryHUDView(frame: NSRect(x: hudX, y: hudY, width: hudW, height: hudH))
+            hud.autoresizingMask = [.minXMargin, .minYMargin]
+            hud.onClose = { [weak self] in
+                self?.hideTelemetryHUD()
+            }
+            containerView.addSubview(hud)
+            telemetryHUD = hud
+        }
+
+        telemetryHUD?.isHidden = false
+        telemetryHUD?.alphaValue = 0.0
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.25
+            telemetryHUD?.animator().alphaValue = 1.0
+        }
+
+        telemetryTimer?.invalidate()
+        telemetryTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.refreshTelemetryData()
+        }
+        refreshTelemetryData()
+    }
+
+    func hideTelemetryHUD() {
+        isTelemetryVisible = false
+        telemetryTimer?.invalidate()
+        telemetryTimer = nil
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.2
+            telemetryHUD?.animator().alphaValue = 0.0
+        } completionHandler: { [weak self] in
+            self?.telemetryHUD?.isHidden = true
+        }
+    }
+
+    private func refreshTelemetryData() {
+        guard isTelemetryVisible, let hud = telemetryHUD else { return }
+
+        // 1. Memory Usage (Resident set size via mach task_info)
+        var ramMB: Double = 32.5
+        var taskInfo = mach_task_basic_info()
+        var count = mach_msg_type_number_t(MemoryLayout<mach_task_basic_info>.size / 4)
+        let kerr: kern_return_t = withUnsafeMutablePointer(to: &taskInfo) {
+            $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
+                task_info(mach_task_self_, task_flavor_t(MACH_TASK_BASIC_INFO), $0, &count)
+            }
+        }
+        if kerr == KERN_SUCCESS {
+            ramMB = Double(taskInfo.resident_size) / (1024.0 * 1024.0)
+        }
+
+        // 2. CPU Usage (CPU load via thread info)
+        var cpuPercent: Double = 0.8
+        var threadList: thread_act_array_t?
+        var threadCount: mach_msg_type_number_t = 0
+        if task_threads(mach_task_self_, &threadList, &threadCount) == KERN_SUCCESS, let threads = threadList {
+            var totCpu: Double = 0.0
+            for i in 0..<Int(threadCount) {
+                var thInfo = thread_basic_info()
+                var thInfoCount = mach_msg_type_number_t(THREAD_INFO_MAX)
+                let thKerr = withUnsafeMutablePointer(to: &thInfo) {
+                    $0.withMemoryRebound(to: integer_t.self, capacity: Int(thInfoCount)) {
+                        thread_info(threads[i], thread_flavor_t(THREAD_BASIC_INFO), $0, &thInfoCount)
+                    }
+                }
+                if thKerr == KERN_SUCCESS && (thInfo.flags & TH_FLAGS_IDLE) == 0 {
+                    totCpu += Double(thInfo.cpu_usage) / Double(TH_USAGE_SCALE) * 100.0
+                }
+            }
+            vm_deallocate(mach_task_self_, vm_address_t(bitPattern: threads), vm_size_t(threadCount * UInt32(MemoryLayout<thread_t>.size)))
+            if totCpu > 0 { cpuPercent = totCpu }
+        }
+
+        // 3. AVPlayer Item Stats (Resolution, FPS, Codec, Forward Buffer)
+        var fps: Double = isPlaying ? 60.0 : 0.0
+        var resolution = "1920 × 1080"
+        var codec = "H.264 / AAC"
+        var forwardBuffer: Double = 0.0
+        var dropped: Int = 0
+
+        if let item = player?.currentItem {
+            if let track = item.tracks.first(where: { $0.assetTrack?.mediaType == .video })?.assetTrack {
+                let sz = track.naturalSize
+                if sz.width > 0 && sz.height > 0 {
+                    resolution = "\(Int(sz.width)) × \(Int(sz.height))"
+                }
+                let nominalRate = Double(track.nominalFrameRate)
+                if nominalRate > 0 && isPlaying {
+                    fps = nominalRate
+                }
+                for desc in track.formatDescriptions {
+                    let mediaSubtype = CMFormatDescriptionGetMediaSubType(desc as! CMFormatDescription)
+                    let fourCC = String(format: "%c%c%c%c",
+                                        (mediaSubtype >> 24) & 0xff,
+                                        (mediaSubtype >> 16) & 0xff,
+                                        (mediaSubtype >> 8) & 0xff,
+                                        mediaSubtype & 0xff).trimmingCharacters(in: .whitespaces)
+                    if !fourCC.isEmpty {
+                        codec = fourCC.uppercased()
+                    }
+                }
+            }
+
+            if let accessLog = item.accessLog()?.events.last {
+                dropped = accessLog.numberOfDroppedVideoFrames
+                if accessLog.indicatedBitrate > 0 {
+                    let mbps = accessLog.indicatedBitrate / 1_000_000.0
+                    codec += " (\(String(format: "%.1f", mbps)) Mbps)"
+                }
+            }
+
+            if let timeRange = item.loadedTimeRanges.first?.timeRangeValue {
+                forwardBuffer = timeRange.duration.seconds
+            }
+        }
+
+        hud.updateTelemetry(fps: fps,
+                            cpuPercent: cpuPercent,
+                            ramMB: ramMB,
+                            droppedFrames: dropped,
+                            resolution: resolution,
+                            codec: codec,
+                            bufferDuration: forwardBuffer)
+    }
+
+    // Auto-Hide Controls only during Full Screen playback
     func showControls(keepVisible: Bool = false) {
+        guard window.styleMask.contains(.fullScreen) else {
+            bottomBar.alphaValue = 1.0
+            NSCursor.unhide()
+            return
+        }
+        
         NSCursor.unhide()
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = 0.2
-            controlBar.animator().alphaValue = 1.0
-            if isHUDVisible { telemetryHUD.animator().alphaValue = 1.0 }
+            bottomBar.animator().alphaValue = 1.0
         }
         
         autoHideTimer?.invalidate()
         if !keepVisible && isPlaying {
             autoHideTimer = Timer.scheduledTimer(withTimeInterval: 2.5, repeats: false) { [weak self] _ in
-                guard let self = self, self.isPlaying else { return }
+                guard let self = self, self.isPlaying, self.window.styleMask.contains(.fullScreen) else { return }
                 NSAnimationContext.runAnimationGroup { ctx in
-                    ctx.duration = 0.5
-                    self.controlBar.animator().alphaValue = 0.0
-                    if self.isHUDVisible { self.telemetryHUD.animator().alphaValue = 0.15 }
+                    ctx.duration = 0.35
+                    self.bottomBar.animator().alphaValue = 0.0
                 } completionHandler: {
-                    if self.isPlaying { NSCursor.setHiddenUntilMouseMoves(true) }
+                    if self.isPlaying && self.window.styleMask.contains(.fullScreen) {
+                        NSCursor.setHiddenUntilMouseMoves(true)
+                    }
                 }
             }
         }
     }
 
-    // Keyboard Shortcuts
+    // Standard Keyboard Shortcuts
     func setupKeyboardShortcuts() {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self else { return event }
@@ -690,35 +1216,37 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case 1: // 'S' -> Stop
                 self.stopPlayback()
                 return nil
-            case 123: // Left Arrow -> Seek -5s
-                self.seekOffset(seconds: -5.0)
+            case 123: // Left Arrow -> Seek -10s (or -60s with Option)
+                let delta = event.modifierFlags.contains(.option) ? -60.0 : -10.0
+                self.seekOffset(seconds: delta)
                 return nil
-            case 124: // Right Arrow -> Seek +5s
-                self.seekOffset(seconds: 5.0)
+            case 124: // Right Arrow -> Seek +10s (or +60s with Option)
+                let delta = event.modifierFlags.contains(.option) ? 60.0 : 10.0
+                self.seekOffset(seconds: delta)
                 return nil
-            case 126: // Up Arrow -> Volume +10%
-                self.adjustVolume(delta: 0.1)
+            case 126: // Up Arrow -> Volume +5%
+                self.adjustVolume(delta: 0.05)
                 return nil
-            case 125: // Down Arrow -> Volume -10%
-                self.adjustVolume(delta: -0.1)
+            case 125: // Down Arrow -> Volume -5%
+                self.adjustVolume(delta: -0.05)
                 return nil
             case 3: // 'F' -> Fullscreen
                 self.toggleFullscreen()
                 return nil
-            case 8: // 'C' -> Subtitles
-                self.toggleSubtitles()
-                return nil
             case 46: // 'M' -> Mute
                 self.toggleMute()
                 return nil
-            case 17: // 'T' -> Toggle HUD
-                self.toggleHUD()
+            case 14: // 'E' -> Step one frame
+                self.seekOffset(seconds: 1.0 / 30.0)
                 return nil
             case 32: // 'U' with Cmd -> Open Stream URL
                 if event.modifierFlags.contains(.command) {
                     self.promptOpenStreamURL()
                     return nil
                 }
+            case 17: // 'T' -> Toggle Telemetry HUD
+                self.toggleTelemetry()
+                return nil
             case 31: // 'O' with Cmd -> Open File
                 if event.modifierFlags.contains(.command) {
                     self.promptOpenFile()
@@ -729,23 +1257,6 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
             return event
         }
-    }
-    
-    func seekOffset(seconds: Double) {
-        guard let player = player, currentDuration > 0, !isLiveStream else { return }
-        let cur = player.currentTime().seconds
-        let target = max(0, min(currentDuration, cur + seconds))
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
-        showControls()
-    }
-    
-    func adjustVolume(delta: Float) {
-        guard let player = player else { return }
-        let newVol = max(0.0, min(1.0, player.volume + delta))
-        player.volume = newVol
-        volumeSlider.doubleValue = Double(newVol)
-        volumeBtn.title = (newVol == 0) ? "🔇" : ((newVol < 0.5) ? "🔉" : "🔊")
-        showControls()
     }
     
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -761,52 +1272,3 @@ let app = NSApplication.shared
 let delegate = SovereignPlayerApp()
 app.delegate = delegate
 app.run()
-
-
-class AppUpdater {
-    static let shared = AppUpdater()
-    let currentVersion = "v1.1.5"
-    let repoURL = "https://api.github.com/repos/TheSPST/sovereign-media-player/releases/latest"
-
-    func checkForUpdates(window: NSWindow?) {
-        guard let url = URL(string: repoURL) else { return }
-        
-        let task = URLSession.shared.dataTask(with: url) { data, response, error in
-            guard let data = data, error == nil else { return }
-            
-            do {
-                if let json = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
-                   let latestVersion = json["tag_name"] as? String,
-                   let htmlUrl = json["html_url"] as? String {
-                    
-                    if latestVersion != self.currentVersion {
-                        DispatchQueue.main.async {
-                            let alert = NSAlert()
-                            alert.messageText = "Update Available"
-                            alert.informativeText = "A new version of Sovereign Media Player (\(latestVersion)) is available. You are currently running \(self.currentVersion)."
-                            alert.alertStyle = .informational
-                            alert.addButton(withTitle: "Download Update")
-                            alert.addButton(withTitle: "Later")
-                            
-                            if let win = window {
-                                alert.beginSheetModal(for: win) { response in
-                                    if response == .alertFirstButtonReturn, let updateURL = URL(string: htmlUrl) {
-                                        NSWorkspace.shared.open(updateURL)
-                                    }
-                                }
-                            } else {
-                                let response = alert.runModal()
-                                if response == .alertFirstButtonReturn, let updateURL = URL(string: htmlUrl) {
-                                    NSWorkspace.shared.open(updateURL)
-                                }
-                            }
-                        }
-                    }
-                }
-            } catch {
-                print("Failed to parse GitHub releases JSON")
-            }
-        }
-        task.resume()
-    }
-}
