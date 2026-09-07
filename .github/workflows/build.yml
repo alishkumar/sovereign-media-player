@@ -98,8 +98,26 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist_win
           Copy-Item build_win\Release\SovereignPlayer.exe dist_win\
-          Copy-Item build_win\Release\sovereign_core.dll dist_win\
+          if (Test-Path build_win\Release\sovereign_core.dll) {
+              Copy-Item build_win\Release\sovereign_core.dll dist_win\
+          }
           Copy-Item core_engine\include\sovereign_engine.h dist_win\
+          @'
+================================================================================
+  SOVEREIGN MEDIA PLAYER - WINDOWS x64 EDITION
+  (C) 2026 Sovereign Byte Technology. All Rights Reserved.
+================================================================================
+QUICK START:
+  1. Extract all files to a folder on your computer (Right-click -> Extract All).
+  2. Double-click SovereignPlayer.exe to launch.
+
+STANDALONE ENGINE:
+  - SovereignPlayer.exe is a 100% self-contained, standalone binary with
+    the core engine statically linked (no external DLL dependencies needed).
+  - For software developers: sovereign_core.dll & sovereign_engine.h are
+    provided for embedding into third-party C# / C++ applications.
+================================================================================
+'@ | Out-File -FilePath dist_win\README.txt -Encoding utf8
           Compress-Archive -Path dist_win\* -DestinationPath SovereignPlayer_Windows_x64.zip
 
       - name: Upload Windows Artifact
