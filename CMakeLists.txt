@@ -39,6 +39,7 @@ else()
     add_library(sovereign_core_static STATIC
         core_engine/sovereign_engine.cpp
     )
+    target_compile_definitions(sovereign_core_static PUBLIC SOVEREIGN_STATIC)
 
     if(WIN32)
         target_compile_definitions(sovereign_core PRIVATE SOVEREIGN_EXPORTS)
