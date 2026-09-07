@@ -17,10 +17,12 @@ class SovereignIcons {
                      Bundle.main.url(forResource: name, withExtension: "png") {
             rawImg = NSImage(contentsOf: url)
         }
-        // 2. Direct Source Path Fallback
+        // 2. Relative Source Path Fallback
         if rawImg == nil {
-            let localPath = "/Users/alishkumar/Documents/sovereign-media-player/frontend_ui/Resources/icons/\(name).png"
-            rawImg = NSImage(contentsOfFile: localPath)
+            let relativePath = "frontend_ui/Resources/icons/\(name).png"
+            if FileManager.default.fileExists(atPath: relativePath) {
+                rawImg = NSImage(contentsOfFile: relativePath)
+            }
         }
         guard let source = rawImg else { return nil }
 
@@ -489,6 +491,7 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var volumeBtn: SVNButton!
     var volumeSlider: SVNVolumeSlider!
     var eqBtn: SVNButton!
+    var ccBtn: SVNButton!
     var fullscreenBtn: SVNButton!
     
     // Telemetry HUD State (Initially Hidden)
@@ -550,7 +553,10 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupBottomBar()
         setupKeyboardShortcuts()
         
-        // 4. Initial layout
+        // 4. In-App Update Checker
+        AppUpdater.shared.checkForUpdates(window: self.window)
+
+        // 5. Initial layout
         updateUILayout()
         
         window.makeKeyAndOrderFront(nil)
@@ -710,6 +716,17 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         eqBtn.action = #selector(showEffectsMenu)
         bottomBar.addSubview(eqBtn)
         
+        // 9.5 Subtitles (CC) Button
+        ccBtn = SVNButton(frame: NSRect(x: 684, y: btnY, width: btnSize, height: btnSize),
+                          title: "CC",
+                          symbolName: "captions.bubble",
+                          pointSize: 12,
+                          iconSize: 14.0)
+        ccBtn.toolTip = "Toggle Subtitles (C)"
+        ccBtn.target = self
+        ccBtn.action = #selector(toggleSubtitles)
+        bottomBar.addSubview(ccBtn)
+        
         // 10. Fullscreen Button (Loads icon_fullscreen.png)
         fullscreenBtn = SVNButton(frame: NSRect(x: 684, y: btnY, width: btnSize, height: btnSize),
                                   title: "⤢",
@@ -758,18 +775,18 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         stopBtn.frame = NSRect(x: 74, y: btnY, width: btnSize, height: btnSize)
         nextBtn.frame = NSRect(x: 106, y: btnY, width: btnSize, height: btnSize)
         
-        // Right Controls: Fullscreen(28) + EQ(28) + VolSlider(65) + VolBtn(28) + Time(98)
+        // Right Controls: Fullscreen(28) + CC(28) + EQ(28) + VolSlider(65) + VolBtn(28) + Time(98)
         let rightMargin: CGFloat = 10.0
         fullscreenBtn.frame = NSRect(x: currentBarW - rightMargin - btnSize, y: btnY, width: btnSize, height: btnSize)
-        
-        eqBtn.frame = NSRect(x: currentBarW - rightMargin - btnSize - 32.0, y: btnY, width: btnSize, height: btnSize)
-        volumeSlider.frame = NSRect(x: currentBarW - rightMargin - btnSize - 32.0 - 70.0, y: btnY + 5.0, width: 65.0, height: 18.0)
-        volumeBtn.frame = NSRect(x: currentBarW - rightMargin - btnSize - 32.0 - 70.0 - btnSize - 4.0, y: btnY, width: btnSize, height: btnSize)
-        timeLabel.frame = NSRect(x: currentBarW - rightMargin - btnSize - 32.0 - 70.0 - btnSize - 4.0 - 102.0, y: btnY + 5.0, width: 98.0, height: 18.0)
+        ccBtn.frame = NSRect(x: currentBarW - rightMargin - btnSize - 30.0, y: btnY, width: btnSize, height: btnSize)
+        eqBtn.frame = NSRect(x: currentBarW - rightMargin - btnSize - 62.0, y: btnY, width: btnSize, height: btnSize)
+        volumeSlider.frame = NSRect(x: currentBarW - rightMargin - btnSize - 62.0 - 70.0, y: btnY + 5.0, width: 65.0, height: 18.0)
+        volumeBtn.frame = NSRect(x: currentBarW - rightMargin - btnSize - 62.0 - 70.0 - btnSize - 4.0, y: btnY, width: btnSize, height: btnSize)
+        timeLabel.frame = NSRect(x: currentBarW - rightMargin - btnSize - 62.0 - 70.0 - btnSize - 4.0 - 102.0, y: btnY + 5.0, width: 98.0, height: 18.0)
         
         // Scrubber fills middle area
         let scrubLeft: CGFloat = 142.0
-        let scrubRight: CGFloat = currentBarW - rightMargin - btnSize - 32.0 - 70.0 - btnSize - 4.0 - 106.0
+        let scrubRight: CGFloat = currentBarW - rightMargin - btnSize - 62.0 - 70.0 - btnSize - 4.0 - 106.0
         let scrubW = max(60.0, scrubRight - scrubLeft)
         scrubberView.frame = NSRect(x: scrubLeft, y: btnY + 4.0, width: scrubW, height: 20.0)
         
@@ -947,6 +964,41 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     
     @objc func toggleFullscreen() {
         window.toggleFullScreen(nil)
+    }
+
+    @objc func toggleSubtitles() {
+        guard let item = player?.currentItem else { return }
+        if #available(macOS 12.0, *) {
+            Task {
+                do {
+                    if let group = try await item.asset.loadMediaSelectionGroup(for: .legible) {
+                        await MainActor.run {
+                            if item.currentMediaSelection.selectedMediaOption(in: group) != nil {
+                                item.select(nil, in: group)
+                            } else {
+                                let options = AVMediaSelectionGroup.mediaSelectionOptions(from: group.options, with: .current)
+                                if let first = options.first ?? group.options.first {
+                                    item.select(first, in: group)
+                                }
+                            }
+                        }
+                    }
+                } catch {
+                    print("Could not load subtitle tracks: \(error)")
+                }
+            }
+        } else {
+            if let group = item.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) {
+                if item.currentMediaSelection.selectedMediaOption(in: group) != nil {
+                    item.select(nil, in: group)
+                } else {
+                    let options = AVMediaSelectionGroup.mediaSelectionOptions(from: group.options, with: .current)
+                    if let first = options.first ?? group.options.first {
+                        item.select(first, in: group)
+                    }
+                }
+            }
+        }
     }
 
     @objc func showEffectsMenu() {
@@ -1236,6 +1288,9 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case 46: // 'M' -> Mute
                 self.toggleMute()
                 return nil
+            case 8: // 'C' -> Toggle Subtitles
+                self.toggleSubtitles()
+                return nil
             case 14: // 'E' -> Step one frame
                 self.seekOffset(seconds: 1.0 / 30.0)
                 return nil
@@ -1272,3 +1327,54 @@ let app = NSApplication.shared
 let delegate = SovereignPlayerApp()
 app.delegate = delegate
 app.run()
+
+
+// ==============================================================================
+// 🔄 AUTOMATIC IN-APP UPDATE CHECKER (GITHUB RELEASES API)
+// ==============================================================================
+class AppUpdater {
+    static let shared = AppUpdater()
+    let currentVersion = "v2.1.0"
+    let repoURL = "https://api.github.com/repos/TheSPST/sovereign-media-player/releases/latest"
+
+    func checkForUpdates(window: NSWindow?) {
+        guard let url = URL(string: repoURL) else { return }
+        
+        let task = URLSession.shared.dataTask(with: url) { data, response, error in
+            guard let data = data, error == nil else { return }
+            
+            do {
+                if let json = try JSONSerialization.jsonObject(with: data, options: []) as? [String: Any],
+                   let latestVersion = json["tag_name"] as? String,
+                   let htmlUrl = json["html_url"] as? String {
+                    
+                    if latestVersion != self.currentVersion {
+                        DispatchQueue.main.async {
+                            let alert = NSAlert()
+                            alert.messageText = "Update Available"
+                            alert.informativeText = "A new version of Sovereign Media Player (\(latestVersion)) is available. You are currently running \(self.currentVersion)."
+                            alert.alertStyle = .informational
+                            alert.addButton(withTitle: "Download Update")
+                            alert.addButton(withTitle: "Later")
+                            
+                            if let win = window {
+                                alert.beginSheetModal(for: win) { response in
+                                    if response == .alertFirstButtonReturn, let updateURL = URL(string: htmlUrl) {
+                                        NSWorkspace.shared.open(updateURL)
+                                    }
+                                }
+                            } else {
+                                if alert.runModal() == .alertFirstButtonReturn, let updateURL = URL(string: htmlUrl) {
+                                    NSWorkspace.shared.open(updateURL)
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch {
+                print("Failed to parse GitHub releases JSON")
+            }
+        }
+        task.resume()
+    }
+}
