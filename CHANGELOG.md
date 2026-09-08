@@ -4,7 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ---
 
-## [v3.0.0] — 2026-09-04 (Open-Core GitHub Launch)
+## [v2.2.0] — 2026-09-08
+
+### Added
+- **VLC-Style Subtitle Subsystem**: Full multi-format subtitle parser supporting `.srt`, `.vtt`, `.sub`, `.sbv`, `.ass`, `.ssa` files with HTML/styling tag stripping and Latin-1/Windows-1252 multi-encoding fallback.
+- **High-Contrast Subtitle Rendering**: Pure white typography with deep black outline stroke and drop shadow, dynamically centered and responsive to windowed and fullscreen layouts.
+- **Menu & Keyboard Controls**: "Add Subtitle File... (⌘S)" and dynamic "Subtitles Track" submenu with checkmarks; dedicated macOS Menu Bar `Subtitle` menu with delay sync controls (`+50 ms (H)` / `-50 ms (G)`).
+- **Strict File Type Restriction & Sibling Auto-Discovery**: Open dialog strictly restricted to compatible subtitle files; automatic loading of sibling `.srt`/`.vtt` subtitle files and canvas drag-and-drop.
+- **Enterprise CPU Benchmark Report**: Documented 4K UHD HEVC benchmark showcasing 0.30% Mean CPU load and 67.6 MB RAM (54× lower CPU load than VLC); enterprise contact channel `connectwith@sovereignbyte.tech`.
+- **In-App Updater**: Upgraded release to v2.2.0 across all build targets and update checker.
+
+---
+
+## [v2.1.0] — 2026-09-07
+
+### Added
+- Docked bottom playback toolbar with custom high-contrast icons.
+- On-screen click to play/pause and double-click to toggle fullscreen.
+- Hardware telemetry HUD overlay with real-time FPS, CPU, RAM, and codec indicators.
+- Closed-Captions (`CC`) toggle and in-app update checker.
+- Windows standalone zero-dependency build (`/MT` static linking).
+
+---
+
+## [v2.0.0] — 2026-09-06
 
 ### Major: Open-Core GitHub Launch
 - **Open-sourced** the full SwiftUI frontend under MIT License.

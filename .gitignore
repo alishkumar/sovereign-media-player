@@ -17,3 +17,14 @@ core_engine/lib/
 *.exe
 *.o
 *.a
+*.mp4
+*.mkv
+*.mov
+*.srt
+*.vtt
+*.sub
+*.ass
+aetherengine-bench/
+*.json
+benchmark_*.py
+gpu_benchmark*.py
