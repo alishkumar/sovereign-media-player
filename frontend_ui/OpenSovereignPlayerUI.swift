@@ -4,6 +4,9 @@ import AVFoundation
 import Metal
 import MetalKit
 import Darwin
+#if canImport(UniformTypeIdentifiers)
+import UniformTypeIdentifiers
+#endif
 
 // ==============================================================================
 // 🎨 SOVEREIGN ICONS & USER ASSET LOADER (WITH TINT & NO DUPLICATION)
@@ -22,6 +25,9 @@ class SovereignIcons {
             let relativePath = "frontend_ui/Resources/icons/\(name).png"
             if FileManager.default.fileExists(atPath: relativePath) {
                 rawImg = NSImage(contentsOfFile: relativePath)
+            } else {
+                let localPath = URL(fileURLWithPath: #file).deletingLastPathComponent().appendingPathComponent("Resources/icons/\(name).png").path
+                rawImg = NSImage(contentsOfFile: localPath)
             }
         }
         guard let source = rawImg else { return nil }
@@ -341,6 +347,7 @@ class SVNDockedBarView: NSVisualEffectView {
 // Drag & Drop and Double-Click Video Surface
 class VideoPlayerWindowView: NSView {
     var onFileDropped: ((URL) -> Void)?
+    var onSubtitleDropped: ((URL) -> Void)?
     var onMouseMove: (() -> Void)?
     var onSingleClick: (() -> Void)?
     var onDoubleClick: (() -> Void)?
@@ -363,9 +370,19 @@ class VideoPlayerWindowView: NSView {
         guard let items = sender.draggingPasteboard.pasteboardItems else { return false }
         for item in items {
             if let stringURL = item.string(forType: .fileURL), let url = URL(string: stringURL) {
+                let ext = url.pathExtension.lowercased()
+                if ["srt", "vtt", "sub", "sbv", "ass", "ssa"].contains(ext) {
+                    onSubtitleDropped?(url)
+                    return true
+                }
                 onFileDropped?(url)
                 return true
             } else if let rawString = item.string(forType: .string), let url = URL(string: rawString), url.scheme != nil {
+                let ext = url.pathExtension.lowercased()
+                if ["srt", "vtt", "sub", "sbv", "ass", "ssa"].contains(ext) {
+                    onSubtitleDropped?(url)
+                    return true
+                }
                 onFileDropped?(url)
                 return true
             }
@@ -469,6 +486,201 @@ class TelemetryHUDView: NSVisualEffectView {
 }
 
 // ==============================================================================
+// 💬 SUBTITLE DATA STRUCTURES & MULTI-FORMAT PARSER (SRT, VTT, SUB, ASS, SSA)
+// ==============================================================================
+struct SubtitleCue: Equatable {
+    let startTime: Double // seconds
+    let endTime: Double   // seconds
+    let text: String
+}
+
+struct SubtitleTrack {
+    let id: String
+    let name: String
+    let url: URL?
+    let cues: [SubtitleCue]
+}
+
+class SVNSubtitleParser {
+    static func parseTimestamp(_ str: String) -> Double? {
+        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = trimmed.replacingOccurrences(of: ",", with: ".")
+        let parts = normalized.split(separator: ":")
+        guard parts.count >= 2 else { return nil }
+        if parts.count == 3 {
+            guard let h = Double(parts[0]), let m = Double(parts[1]), let s = Double(parts[2]) else { return nil }
+            return h * 3600.0 + m * 60.0 + s
+        } else if parts.count == 2 {
+            guard let m = Double(parts[0]), let s = Double(parts[1]) else { return nil }
+            return m * 60.0 + s
+        }
+        return nil
+    }
+
+    static func cleanSubtitleText(_ text: String) -> String {
+        var cleaned = text
+        // Remove HTML/XML styling tags e.g. <i>, </b>, <font color="...">
+        cleaned = cleaned.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
+        // Remove ASS/SSA override blocks e.g. {\pos(100,200)}
+        cleaned = cleaned.replacingOccurrences(of: "\\{[^}]+\\}", with: "", options: .regularExpression)
+        // Convert explicit newline tokens
+        cleaned = cleaned.replacingOccurrences(of: "\\N", with: "\n")
+        cleaned = cleaned.replacingOccurrences(of: "\\n", with: "\n")
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    static func parseSRTOrVTT(content: String) -> [SubtitleCue] {
+        var cues: [SubtitleCue] = []
+        let lines = content.components(separatedBy: .newlines)
+        var i = 0
+        while i < lines.count {
+            let line = lines[i].trimmingCharacters(in: .whitespacesAndNewlines)
+            if line.contains("-->") {
+                let parts = line.components(separatedBy: "-->")
+                if parts.count == 2,
+                   let start = parseTimestamp(parts[0]),
+                   let end = parseTimestamp(parts[1].trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: .whitespaces).first ?? "") {
+                    var textLines: [String] = []
+                    i += 1
+                    while i < lines.count {
+                        let textLine = lines[i].trimmingCharacters(in: .whitespacesAndNewlines)
+                        if textLine.isEmpty { break }
+                        if textLine.contains("-->") {
+                            i -= 1 // backtrack to cue header
+                            break
+                        }
+                        if let _ = Int(textLine), i + 1 < lines.count && lines[i + 1].contains("-->") {
+                            break
+                        }
+                        textLines.append(textLine)
+                        i += 1
+                    }
+                    let rawText = textLines.joined(separator: "\n")
+                    let cleaned = cleanSubtitleText(rawText)
+                    if !cleaned.isEmpty {
+                        cues.append(SubtitleCue(startTime: start, endTime: end, text: cleaned))
+                    }
+                }
+            }
+            i += 1
+        }
+        return cues.sorted { $0.startTime < $1.startTime }
+    }
+
+    static func parseASS(content: String) -> [SubtitleCue] {
+        var cues: [SubtitleCue] = []
+        let lines = content.components(separatedBy: .newlines)
+        for line in lines {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("Dialogue:") {
+                let payload = trimmed.dropFirst(9).trimmingCharacters(in: .whitespaces)
+                let parts = payload.components(separatedBy: ",")
+                if parts.count >= 10,
+                   let start = parseTimestamp(parts[1]),
+                   let end = parseTimestamp(parts[2]) {
+                    let text = parts[9...].joined(separator: ",")
+                    let cleaned = cleanSubtitleText(text)
+                    if !cleaned.isEmpty {
+                        cues.append(SubtitleCue(startTime: start, endTime: end, text: cleaned))
+                    }
+                }
+            }
+        }
+        return cues.sorted { $0.startTime < $1.startTime }
+    }
+
+    static func load(from url: URL) -> [SubtitleCue] {
+        guard let data = try? Data(contentsOf: url) else { return [] }
+        let str = String(data: data, encoding: .utf8) ??
+                  String(data: data, encoding: .isoLatin1) ??
+                  String(data: data, encoding: .windowsCP1252) ?? ""
+        guard !str.isEmpty else { return [] }
+        let ext = url.pathExtension.lowercased()
+        if ext == "ass" || ext == "ssa" {
+            return parseASS(content: str)
+        } else {
+            return parseSRTOrVTT(content: str)
+        }
+    }
+}
+
+// ==============================================================================
+// 📺 VLC-STYLE HIGH-CONTRAST SUBTITLE OVERLAY VIEW
+// ==============================================================================
+class SVNSubtitleOverlayView: NSView {
+    private let label = NSTextField()
+    private var currentText: String = ""
+    var isFullScreen: Bool = false
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        self.wantsLayer = true
+        self.layer?.masksToBounds = false
+        
+        label.isEditable = false
+        label.isSelectable = false
+        label.isBordered = false
+        label.drawsBackground = false
+        label.alignment = .center
+        label.maximumNumberOfLines = 4
+        label.cell?.wraps = true
+        label.cell?.isScrollable = false
+        addSubview(label)
+        self.isHidden = true
+    }
+
+    required init?(coder: NSCoder) { super.init(coder: coder) }
+
+    // Click-through: never block video play/pause or double-click gestures
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        return nil
+    }
+
+    func setSubtitle(_ text: String?) {
+        let newText = text ?? ""
+        if newText == currentText { return }
+        currentText = newText
+        
+        if currentText.isEmpty {
+            label.attributedStringValue = NSAttributedString(string: "")
+            self.isHidden = true
+            return
+        }
+        
+        self.isHidden = false
+        let fontSize: CGFloat = isFullScreen ? 26.0 : 20.0
+        let font = NSFont.systemFont(ofSize: fontSize, weight: .bold)
+        
+        let style = NSMutableParagraphStyle()
+        style.alignment = .center
+        style.lineBreakMode = .byWordWrapping
+        
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.9)
+        shadow.shadowOffset = NSSize(width: 0, height: -1.5)
+        shadow.shadowBlurRadius = 3.0
+        
+        // VLC iconic styling: crisp pure white with black stroke and drop shadow
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.white,
+            .strokeColor: NSColor.black,
+            .strokeWidth: -3.2, // Negative stroke width strokes AND fills!
+            .paragraphStyle: style,
+            .shadow: shadow
+        ]
+        
+        label.attributedStringValue = NSAttributedString(string: currentText, attributes: attrs)
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        label.frame = bounds
+    }
+}
+
+// ==============================================================================
 // 🚀 MASTER SOVEREIGN VIDEO PLAYER (SOVEREIGN PLAYER)
 // ==============================================================================
 class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
@@ -509,6 +721,13 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var autoHideTimer: Timer?
     var trackingArea: NSTrackingArea?
 
+    // Subtitle Subsystem State
+    var subtitleOverlayView: SVNSubtitleOverlayView!
+    var subtitleTracks: [SubtitleTrack] = []
+    var activeSubtitleTrackIndex: Int = -1 // -1 means Disabled
+    var subtitleDelay: Double = 0.0        // Seconds offset (+/- 50ms)
+    var subtitleTrackSubmenu: NSMenu?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // 1. Setup Main Window (Named "Sovereign Player")
         let screenSize = NSScreen.main?.frame.size ?? CGSize(width: 1280, height: 720)
@@ -533,6 +752,9 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         containerView.onFileDropped = { [weak self] url in
             self?.loadMediaSource(url: url)
         }
+        containerView.onSubtitleDropped = { [weak self] url in
+            self?.loadSubtitleFile(url: url)
+        }
         containerView.onMouseMove = { [weak self] in
             self?.showControls()
         }
@@ -546,11 +768,16 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         window.contentView?.addSubview(containerView)
         
+        // 2b. VLC-style Subtitle Overlay View
+        subtitleOverlayView = SVNSubtitleOverlayView(frame: .zero)
+        containerView.addSubview(subtitleOverlayView)
+        
         window.acceptsMouseMovedEvents = true
         setupTrackingArea()
 
-        // 3. Setup Docked Bottom Toolbar
+        // 3. Setup Docked Bottom Toolbar & Menus
         setupBottomBar()
+        setupAppMainMenu()
         setupKeyboardShortcuts()
         
         // 4. In-App Update Checker
@@ -561,6 +788,7 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        AppUpdater.shared.checkForUpdates(window: window)
         
         // 5. Initial source
         let args = CommandLine.arguments
@@ -659,6 +887,7 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let curStr = self.formatTime(seconds: curSec)
             let durStr = self.formatTime(seconds: self.currentDuration)
             self.timeLabel.stringValue = "\(curStr) / \(durStr)"
+            self.updateSubtitle(currentTime: curSec)
         }
         scrubberView.onScrubEnd = { [weak self] progress in
             guard let self = self, let player = self.player, self.currentDuration > 0, !self.isLiveStream else {
@@ -669,6 +898,7 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let targetTime = CMTime(seconds: targetSec, preferredTimescale: 600)
             player.seek(to: targetTime, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
                 self?.isSeeking = false
+                self?.updateSubtitle(currentTime: targetSec)
             }
         }
         bottomBar.addSubview(scrubberView)
@@ -789,6 +1019,15 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let scrubRight: CGFloat = currentBarW - rightMargin - btnSize - 62.0 - 70.0 - btnSize - 4.0 - 106.0
         let scrubW = max(60.0, scrubRight - scrubLeft)
         scrubberView.frame = NSRect(x: scrubLeft, y: btnY + 4.0, width: scrubW, height: 20.0)
+
+        // Subtitle Overlay Positioning (VLC style, centered bottom above toolbar)
+        if subtitleOverlayView != nil {
+            subtitleOverlayView.isFullScreen = isFull
+            let subH: CGFloat = isFull ? 120.0 : 85.0
+            let subW: CGFloat = min(winW - 60.0, isFull ? 1100.0 : 860.0)
+            let subY: CGFloat = isFull ? 76.0 : (barH + 8.0)
+            subtitleOverlayView.frame = NSRect(x: (winW - subW) / 2.0, y: subY, width: subW, height: subH)
+        }
         
         CATransaction.begin()
         CATransaction.setDisableActions(true)
@@ -864,12 +1103,32 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 let durStr = self.formatTime(seconds: durSec)
                 self.timeLabel.stringValue = "\(curStr) / \(durStr)"
             }
+            self.updateSubtitle(currentTime: time.seconds)
         }
         
         player?.play()
         isPlaying = true
         playPauseBtn.updateIcon(symbolName: "pause.fill", assetName: "icon_pause", fallbackText: "❚❚")
         updateUILayout()
+
+        // Subtitle Reset & Auto-Discovery
+        subtitleTracks.removeAll()
+        activeSubtitleTrackIndex = -1
+        subtitleDelay = 0.0
+        subtitleOverlayView?.setSubtitle(nil)
+        
+        if url.isFileURL {
+            let baseWithoutExt = url.deletingPathExtension()
+            let siblingExtensions = ["srt", "vtt", "sub", "sbv", "ass", "ssa"]
+            for ext in siblingExtensions {
+                let subURL = baseWithoutExt.appendingPathExtension(ext)
+                if FileManager.default.fileExists(atPath: subURL.path) {
+                    loadSubtitleFile(url: subURL)
+                    break
+                }
+            }
+        }
+        updateAppMainMenu()
     }
 
     func formatTime(seconds: Double) -> String {
@@ -911,6 +1170,7 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let durStr = formatTime(seconds: currentDuration)
         timeLabel.stringValue = "00:00 / \(durStr)"
         playPauseBtn.updateIcon(symbolName: "play.fill", assetName: "icon_play", fallbackText: "▶")
+        subtitleOverlayView?.setSubtitle(nil)
         showControls(keepVisible: true)
     }
     
@@ -926,7 +1186,9 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard let player = player, currentDuration > 0, !isLiveStream else { return }
         let cur = player.currentTime().seconds
         let target = max(0, min(currentDuration, cur + seconds))
-        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+        player.seek(to: CMTime(seconds: target, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] _ in
+            self?.updateSubtitle(currentTime: target)
+        }
     }
 
     func updateVolumeIcon(vol: Float) {
@@ -1029,6 +1291,35 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         menu.addItem(openStreamItem)
         
         menu.addItem(NSMenuItem.separator())
+        let addSubItem = NSMenuItem(title: "Add Subtitle File... (⌘S)", action: #selector(promptAddSubtitleFile), keyEquivalent: "")
+        addSubItem.target = self
+        menu.addItem(addSubItem)
+        
+        let subTrackItem = NSMenuItem(title: "Subtitles Track", action: nil, keyEquivalent: "")
+        let trackMenu = NSMenu(title: "Subtitles Track")
+        let disableItem = NSMenuItem(title: (activeSubtitleTrackIndex == -1 ? "✓ " : "    ") + "Disable", action: #selector(handleSubtitleTrackSelect(_:)), keyEquivalent: "")
+        disableItem.tag = -1
+        disableItem.target = self
+        trackMenu.addItem(disableItem)
+        
+        if subtitleTracks.isEmpty {
+            let emptyItem = NSMenuItem(title: "    (No Subtitles Loaded)", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            trackMenu.addItem(emptyItem)
+        } else {
+            for (idx, track) in subtitleTracks.enumerated() {
+                let isCurrent = (activeSubtitleTrackIndex == idx)
+                let prefix = isCurrent ? "✓ " : "    "
+                let item = NSMenuItem(title: "\(prefix)Track \(idx + 1) - \(track.name)", action: #selector(handleSubtitleTrackSelect(_:)), keyEquivalent: "")
+                item.tag = idx
+                item.target = self
+                trackMenu.addItem(item)
+            }
+        }
+        subTrackItem.submenu = trackMenu
+        menu.addItem(subTrackItem)
+
+        menu.addItem(NSMenuItem.separator())
         let telemetryTitle = isTelemetryVisible ? "✓ Hide Telemetry Report (T)" : "   Show Telemetry Report (T)"
         let telemetryItem = NSMenuItem(title: telemetryTitle, action: #selector(toggleTelemetry), keyEquivalent: "")
         telemetryItem.target = self
@@ -1081,6 +1372,225 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if panel.runModal() == .OK, let url = panel.url {
             loadMediaSource(url: url)
         }
+    }
+
+    // ==========================================================================
+    // 💬 SUBTITLE MANAGEMENT & ROUTING
+    // ==========================================================================
+    func updateSubtitle(currentTime: Double) {
+        guard activeSubtitleTrackIndex >= 0 && activeSubtitleTrackIndex < subtitleTracks.count else {
+            subtitleOverlayView?.setSubtitle(nil)
+            return
+        }
+        let track = subtitleTracks[activeSubtitleTrackIndex]
+        let adjustedTime = currentTime - subtitleDelay
+        
+        if let cue = track.cues.first(where: { adjustedTime >= $0.startTime && adjustedTime <= $0.endTime }) {
+            subtitleOverlayView?.setSubtitle(cue.text)
+        } else {
+            subtitleOverlayView?.setSubtitle(nil)
+        }
+    }
+
+    func loadSubtitleFile(url: URL) {
+        let cues = SVNSubtitleParser.load(from: url)
+        guard !cues.isEmpty else {
+            let alert = NSAlert()
+            alert.messageText = "Subtitle File Invalid or Empty"
+            alert.informativeText = "No valid subtitle cues found in:\n\(url.lastPathComponent)\n\nPlease ensure the file contains valid timestamps."
+            alert.alertStyle = .warning
+            alert.runModal()
+            return
+        }
+        
+        let trackName = url.deletingPathExtension().lastPathComponent
+        let track = SubtitleTrack(id: UUID().uuidString, name: trackName, url: url, cues: cues)
+        subtitleTracks.append(track)
+        activeSubtitleTrackIndex = subtitleTracks.count - 1
+        
+        if let player = player {
+            updateSubtitle(currentTime: player.currentTime().seconds)
+        }
+        updateAppMainMenu()
+    }
+
+    @objc func promptAddSubtitleFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Load Subtitle"
+        panel.title = "Add Subtitle File"
+        
+        let subtitleExtensions = ["srt", "vtt", "sub", "sbv", "ass", "ssa"]
+        #if canImport(UniformTypeIdentifiers)
+        if #available(macOS 12.0, *) {
+            var types: [UTType] = []
+            for ext in subtitleExtensions {
+                if let ut = UTType(filenameExtension: ext) {
+                    types.append(ut)
+                }
+            }
+            if !types.isEmpty {
+                panel.allowedContentTypes = types
+            } else {
+                panel.allowedFileTypes = subtitleExtensions
+            }
+        } else {
+            panel.allowedFileTypes = subtitleExtensions
+        }
+        #else
+        panel.allowedFileTypes = subtitleExtensions
+        #endif
+        panel.allowsOtherFileTypes = false
+        
+        if panel.runModal() == .OK, let url = panel.url {
+            loadSubtitleFile(url: url)
+        }
+    }
+
+    @objc func handleSubtitleTrackSelect(_ sender: NSMenuItem) {
+        activeSubtitleTrackIndex = sender.tag
+        if let player = player {
+            updateSubtitle(currentTime: player.currentTime().seconds)
+        }
+        updateAppMainMenu()
+    }
+
+    func adjustSubtitleDelay(delta: Double) {
+        subtitleDelay += delta
+        if let player = player {
+            updateSubtitle(currentTime: player.currentTime().seconds)
+        }
+    }
+
+    @objc func subtitleDelayUp() {
+        adjustSubtitleDelay(delta: 0.05) // +50ms
+    }
+
+    @objc func subtitleDelayDown() {
+        adjustSubtitleDelay(delta: -0.05) // -50ms
+    }
+
+    @objc func resetSubtitleDelay() {
+        subtitleDelay = 0.0
+        if let player = player {
+            updateSubtitle(currentTime: player.currentTime().seconds)
+        }
+    }
+
+    // Top macOS Menu Bar Integration (VLC parity)
+    func setupAppMainMenu() {
+        let mainMenu = NSMenu()
+        
+        // 1. Application Menu
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "About Sovereign Player", action: #selector(showAbout), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Hide Sovereign Player", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        let hideOthers = NSMenuItem(title: "Hide Others", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(hideOthers)
+        appMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Quit Sovereign Player", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+        
+        // 2. File Menu
+        let fileMenuItem = NSMenuItem()
+        let fileMenu = NSMenu(title: "File")
+        fileMenu.addItem(withTitle: "Open File...", action: #selector(promptOpenFile), keyEquivalent: "o")
+        fileMenu.addItem(withTitle: "Open Network Stream...", action: #selector(promptOpenStreamURL), keyEquivalent: "u")
+        fileMenu.addItem(NSMenuItem.separator())
+        let addSubFileItem = NSMenuItem(title: "Add Subtitle File...", action: #selector(promptAddSubtitleFile), keyEquivalent: "s")
+        fileMenu.addItem(addSubFileItem)
+        fileMenu.addItem(NSMenuItem.separator())
+        fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        fileMenuItem.submenu = fileMenu
+        mainMenu.addItem(fileMenuItem)
+        
+        // 3. Playback Menu
+        let playbackMenuItem = NSMenuItem()
+        let playbackMenu = NSMenu(title: "Playback")
+        playbackMenu.addItem(withTitle: "Play / Pause", action: #selector(togglePlayPause), keyEquivalent: " ")
+        playbackMenu.addItem(withTitle: "Stop", action: #selector(stopPlayback), keyEquivalent: "")
+        playbackMenu.addItem(withTitle: "Rewind 10 Seconds", action: #selector(rewind10), keyEquivalent: "")
+        playbackMenu.addItem(withTitle: "Forward 10 Seconds", action: #selector(forward10), keyEquivalent: "")
+        playbackMenu.addItem(NSMenuItem.separator())
+        playbackMenu.addItem(withTitle: "Toggle Fullscreen", action: #selector(toggleFullscreen), keyEquivalent: "f")
+        playbackMenu.addItem(withTitle: "Mute", action: #selector(toggleMute), keyEquivalent: "m")
+        playbackMenuItem.submenu = playbackMenu
+        mainMenu.addItem(playbackMenuItem)
+        
+        // 4. Subtitle Menu
+        let subMenuItem = NSMenuItem()
+        let subMenu = NSMenu(title: "Subtitle")
+        
+        let subAdd = NSMenuItem(title: "Add Subtitle File...", action: #selector(promptAddSubtitleFile), keyEquivalent: "")
+        subMenu.addItem(subAdd)
+        subMenu.addItem(NSMenuItem.separator())
+        
+        let trackContainer = NSMenuItem(title: "Subtitles Track", action: nil, keyEquivalent: "")
+        let trackMenu = NSMenu(title: "Subtitles Track")
+        self.subtitleTrackSubmenu = trackMenu
+        trackContainer.submenu = trackMenu
+        subMenu.addItem(trackContainer)
+        
+        subMenu.addItem(NSMenuItem.separator())
+        let delayUpItem = NSMenuItem(title: "Subtitle Delay +50 ms", action: #selector(subtitleDelayUp), keyEquivalent: "h")
+        let delayDownItem = NSMenuItem(title: "Subtitle Delay -50 ms", action: #selector(subtitleDelayDown), keyEquivalent: "g")
+        let delayResetItem = NSMenuItem(title: "Reset Subtitle Delay", action: #selector(resetSubtitleDelay), keyEquivalent: "")
+        subMenu.addItem(delayUpItem)
+        subMenu.addItem(delayDownItem)
+        subMenu.addItem(delayResetItem)
+        
+        subMenuItem.submenu = subMenu
+        mainMenu.addItem(subMenuItem)
+        
+        // 5. View Menu
+        let viewMenuItem = NSMenuItem()
+        let viewMenu = NSMenu(title: "View")
+        viewMenu.addItem(withTitle: "Toggle Telemetry Report", action: #selector(toggleTelemetry), keyEquivalent: "t")
+        viewMenuItem.submenu = viewMenu
+        mainMenu.addItem(viewMenuItem)
+        
+        NSApp.mainMenu = mainMenu
+        updateAppMainMenu()
+    }
+
+    func updateAppMainMenu() {
+        guard let trackMenu = subtitleTrackSubmenu else { return }
+        trackMenu.removeAllItems()
+        
+        let disableItem = NSMenuItem(title: (activeSubtitleTrackIndex == -1 ? "✓ " : "    ") + "Disable", action: #selector(handleSubtitleTrackSelect(_:)), keyEquivalent: "")
+        disableItem.tag = -1
+        disableItem.target = self
+        trackMenu.addItem(disableItem)
+        
+        if subtitleTracks.isEmpty {
+            let emptyItem = NSMenuItem(title: "    (No Subtitles Loaded)", action: nil, keyEquivalent: "")
+            emptyItem.isEnabled = false
+            trackMenu.addItem(emptyItem)
+        } else {
+            for (idx, track) in subtitleTracks.enumerated() {
+                let isCurrent = (activeSubtitleTrackIndex == idx)
+                let prefix = isCurrent ? "✓ " : "    "
+                let item = NSMenuItem(title: "\(prefix)Track \(idx + 1) - \(track.name)", action: #selector(handleSubtitleTrackSelect(_:)), keyEquivalent: "")
+                item.tag = idx
+                item.target = self
+                trackMenu.addItem(item)
+            }
+        }
+    }
+
+    @objc func showAbout() {
+        let alert = NSAlert()
+        alert.messageText = "Sovereign Player"
+        alert.informativeText = "High-Performance Sovereign Media Player\nVersion 2.2.0 (Open-Core)\nUniversal Metal & AVFoundation Architecture\nEquipped with Subtitle Engine (SRT, VTT, SUB, ASS, SSA)"
+        alert.alertStyle = .informational
+        alert.runModal()
     }
 
     // ==========================================================================
@@ -1265,8 +1775,18 @@ class SovereignPlayerApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             case 49: // Spacebar -> Play / Pause
                 self.togglePlayPause()
                 return nil
-            case 1: // 'S' -> Stop
-                self.stopPlayback()
+            case 1: // 'S' -> Stop, or Cmd+S -> Add Subtitle File
+                if event.modifierFlags.contains(.command) {
+                    self.promptAddSubtitleFile()
+                } else {
+                    self.stopPlayback()
+                }
+                return nil
+            case 4: // 'H' -> Subtitle Delay +50ms
+                self.subtitleDelayUp()
+                return nil
+            case 5: // 'G' -> Subtitle Delay -50ms
+                self.subtitleDelayDown()
                 return nil
             case 123: // Left Arrow -> Seek -10s (or -60s with Option)
                 let delta = event.modifierFlags.contains(.option) ? -60.0 : -10.0
@@ -1328,13 +1848,12 @@ let delegate = SovereignPlayerApp()
 app.delegate = delegate
 app.run()
 
-
 // ==============================================================================
 // 🔄 AUTOMATIC IN-APP UPDATE CHECKER (GITHUB RELEASES API)
 // ==============================================================================
 class AppUpdater {
     static let shared = AppUpdater()
-    let currentVersion = "v2.1.0"
+    let currentVersion = "v2.2.0"
     let repoURL = "https://api.github.com/repos/TheSPST/sovereign-media-player/releases/latest"
 
     func checkForUpdates(window: NSWindow?) {
